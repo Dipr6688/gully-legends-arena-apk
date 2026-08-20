@@ -1,0 +1,6 @@
+# Copy this file to signing.properties and keep signing.properties out of source control.
+# Values may also be supplied with the matching GULLY_RELEASE_* environment variables.
+storeFile=../local-signing/gully.keystore
+storePassword=
+keyAlias=
+keyPassword=

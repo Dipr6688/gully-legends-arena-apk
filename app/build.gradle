@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.gullylegends.arena'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.gullylegends.arena"
+        minSdk 24
+        targetSdk 34
+        versionCode 3
+        versionName "1.1.1"
+    }
+
+    def signingProperties = new Properties()
+    def signingPropertiesFile = rootProject.file("signing.properties")
+    if (signingPropertiesFile.exists()) {
+        signingPropertiesFile.withInputStream { signingProperties.load(it) }
+    }
+    def releaseStoreFile = signingProperties.getProperty("storeFile") ?: System.getenv("GULLY_RELEASE_STORE_FILE")
+    def releaseStorePassword = signingProperties.getProperty("storePassword") ?: System.getenv("GULLY_RELEASE_STORE_PASSWORD")
+    def releaseKeyAlias = signingProperties.getProperty("keyAlias") ?: System.getenv("GULLY_RELEASE_KEY_ALIAS")
+    def releaseKeyPassword = signingProperties.getProperty("keyPassword") ?: System.getenv("GULLY_RELEASE_KEY_PASSWORD")
+    def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+    signingConfigs {
+        release {
+            if (releaseStoreFile) {
+                storeFile rootProject.file(releaseStoreFile)
+            }
+            storePassword releaseStorePassword
+            keyAlias releaseKeyAlias
+            keyPassword releaseKeyPassword
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.16.0'
+}
