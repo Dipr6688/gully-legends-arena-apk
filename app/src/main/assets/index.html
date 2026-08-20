@@ -1134,10 +1134,9 @@ function assignNext(id){
 function bowlerModal(st){
   var bowl=teamOf(active,otherK(st.batting));
   var ids=bowl.ids.filter(function(id){return id!==st.striker&&id!==st.nonStriker&&id!==st.lastOverBowler});
-  if(!ids.length)ids=bowl.ids.filter(function(id){return id!==st.striker&&id!==st.nonStriker});
-  if(!ids.length)ids=bowl.ids;
   var h='<h3>'+(st.balls===0?'Opening bowler':'Over complete — next bowler')+'</h3>';
   if(st.lastOverBowler)h+='<div class="sub" style="margin-bottom:8px">'+esc(pname(st.lastOverBowler))+' can\'t bowl two overs in a row (website rule).</div>';
+  if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available without repeating the previous over.</div>';
   ids.forEach(function(id){
     var f=st.bowlers[id];
     var note=f?(ov(f.balls)+' ov, '+f.runs+'r, '+f.wickets+'w'):'';
@@ -1349,7 +1348,7 @@ function renderEditor(){
     var bat=teamOf(m,v.batting);
     h+='<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><b>'+esc(bat.name)+'</b><b>'+v.score+'/'+v.wickets+' ('+ov(v.balls)+')</b></div>';
     (v.overs||[]).forEach(function(o,oi){
-      h+='<div class="overblock"><div class="overhead"><span>Over '+(oi+1)+' — <b onclick="editOverBowler('+ix+','+o.bowlerEvIdx+')" style="text-decoration:underline">'+esc(nameOf(m,o.bowler))+'</b></span><span class="sub">'+o.runs+' runs</span></div>';
+      h+='<div class="overblock"><div class="overhead"><span>Over '+(oi+1)+' — <b onclick="editOverBowler('+ix+','+o.bowlerEvIdx+','+oi+')" style="text-decoration:underline">'+esc(nameOf(m,o.bowler))+'</b></span><span class="sub">'+o.runs+' runs</span></div>';
       o.balls.forEach(function(bl){
         var cls='';if(bl.label==='4')cls='b4';if(bl.label==='6')cls='b6';if(bl.label==='W')cls='bw';
         h+='<button class="ballchip '+cls+'" onclick="editBall('+ix+','+bl.i+')">'+bl.label+'</button>';
@@ -1416,8 +1415,9 @@ function appendBall(ix){
   if(v.needsBowler){
     var bowl=teamOf(m,otherK(v.batting));
     var ids=bowl.ids.filter(function(id){return id!==v.striker&&id!==v.nonStriker&&id!==v.lastOverBowler});
-    if(!ids.length)ids=bowl.ids;
     var h='<h3>Next over — pick bowler first</h3>';
+    if(v.lastOverBowler)h+='<div class="sub" style="margin-bottom:8px">'+esc(nameOf(m,v.lastOverBowler))+' can\'t bowl two overs in a row.</div>';
+    if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available without repeating the previous over.</div>';
     ids.forEach(function(id){h+='<button class="pick" onclick="closeModal();edPushBowler('+ix+','+jid(id)+')">'+esc(nameOf(m,id))+'</button>'});
     showModal(h);return;
   }
@@ -1457,12 +1457,18 @@ function edDelete(){
   m.innings[edCtx.ix].events.splice(edCtx.evIdx,1);
   editorRefresh(m);
 }
-function editOverBowler(ix,bowlerEvIdx){
+function editOverBowler(ix,bowlerEvIdx,overIx){
   var m=findMatch(editingMatchId);
   var v=getView(m,ix);
   var bowl=teamOf(m,otherK(v.batting));
+  var prevBowler=(v.overs[overIx-1]&&v.overs[overIx-1].bowler)||null;
+  var nextBowler=(v.overs[overIx+1]&&v.overs[overIx+1].bowler)||null;
   var h='<h3>Change bowler for this over</h3>';
-  bowl.ids.forEach(function(id){
+  if(prevBowler)h+='<div class="sub" style="margin-bottom:6px">Unavailable after Over '+overIx+': '+esc(nameOf(m,prevBowler))+'</div>';
+  if(nextBowler)h+='<div class="sub" style="margin-bottom:8px">Unavailable before Over '+(overIx+2)+': '+esc(nameOf(m,nextBowler))+'</div>';
+  var ids=bowl.ids.filter(function(id){return id!==prevBowler&&id!==nextBowler});
+  if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available for this correction without creating consecutive overs.</div>';
+  ids.forEach(function(id){
     h+='<button class="pick" onclick="closeModal();edSetBowler('+ix+','+bowlerEvIdx+','+jid(id)+')">'+esc(nameOf(m,id))+'</button>';
   });
   showModal(h);
