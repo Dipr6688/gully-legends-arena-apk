@@ -66,8 +66,8 @@ assert(!buildGradle.includes('storePassword "'), "Gradle must not hardcode store
 assert(!buildGradle.includes('keyPassword "'), "Gradle must not hardcode keyPassword");
 assert(buildGradle.includes("signing.properties"), "Gradle must read local signing.properties");
 assert(buildGradle.includes("androidx.webkit:webkit:1.16.0"), "AndroidX WebKit dependency is missing");
-assert(buildGradle.includes("versionCode 5"), "versionCode must be incremented to 5");
-assert(buildGradle.includes('versionName "1.2.0"'), "versionName must be 1.2.0");
+assert(buildGradle.includes("versionCode 6"), "versionCode must be incremented to 6");
+assert(buildGradle.includes('versionName "1.3.0"'), "versionName must be 1.3.0");
 assert(gradleProperties.includes("android.useAndroidX=true"), "AndroidX must be enabled");
 assert(gitignore.includes("signing.properties"), "signing.properties must be ignored");
 assert(gitignore.includes("*.keystore"), "keystore files must be ignored");
