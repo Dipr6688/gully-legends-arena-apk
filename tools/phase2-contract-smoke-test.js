@@ -29,9 +29,10 @@ const convertMatch = functionBody("convertMatch");
 assert(convertMatch.includes("offlineMatchId"), "app-sync payload must include offlineMatchId");
 assert(convertMatch.includes("syncVersion"), "app-sync payload must include syncVersion");
 assert(convertMatch.includes("isDemo"), "app-sync payload must include isDemo");
+assert(convertMatch.includes("matchDate"), "app-sync payload must include explicit matchDate");
 assert(convertMatch.includes("startedAt"), "app-sync payload must include startedAt");
 assert(convertMatch.includes("completedAt"), "app-sync payload must include completedAt");
-["matchDate", "matchNumber", "playerOfMatchId", "expectedUpdatedAt"].forEach((field) => {
+["matchNumber", "playerOfMatchId", "expectedUpdatedAt"].forEach((field) => {
   assert(!convertMatch.includes(field), `app-sync payload must not send ${field}`);
 });
 

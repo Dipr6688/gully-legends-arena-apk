@@ -23,6 +23,7 @@ function createElement() {
 }
 
 const elements = new Map();
+const localStore = new Map();
 const context = {
   console,
   Date,
@@ -31,9 +32,9 @@ const context = {
   Promise,
   parseInt,
   localStorage: {
-    getItem() { return null; },
-    setItem() {},
-    removeItem() {},
+    getItem(key) { return localStore.has(key) ? localStore.get(key) : null; },
+    setItem(key, value) { localStore.set(key, String(value)); },
+    removeItem(key) { localStore.delete(key); },
   },
   location: { protocol: "https:", host: "www.gullylegends.eu", search: "" },
   window: {},
@@ -206,6 +207,7 @@ context.matches = [
     finished: true,
     isDemo: false,
     completedAt: "2026-08-22T09:00:00.000Z",
+    matchDate: "2026-01-05",
     overs: 8,
     battingMode: "single_batter",
     shared: "s",
@@ -222,6 +224,7 @@ assert.strictEqual(template.shared, "s", "previous teams should carry shared pla
 assert.strictEqual(JSON.stringify(template.helpers), JSON.stringify(["a"]), "fielding helpers should be current normal team players only");
 assert.strictEqual(template.overs, 8, "previous teams should carry overs");
 assert.strictEqual(template.battingMode, "single_batter", "previous teams should carry batting mode");
+assert.strictEqual(template.matchDate, undefined, "previous teams must not carry an old match date");
 assert.strictEqual(JSON.stringify(template.missing.sort()), JSON.stringify(["gone", "missing-helper"]), "missing roster ids should be reported");
 
 context.prepareMatchSetup(template);
@@ -231,6 +234,7 @@ assert.strictEqual(context.pickState.s, "S", "Use Previous Teams should prefill 
 assert.strictEqual(context.helperState.a, true, "Use Previous Teams should prefill valid helpers");
 assert.strictEqual(context.helperState.s, undefined, "shared player should not be carried as helper");
 assert.strictEqual(elements.get("setupNotice").textContent.includes("Missing roster player"), true, "missing players should be visibly reported");
+assert.strictEqual(elements.get("matchDateInput").value, context.currentPragueMatchDate(), "Use Previous Teams should default Match Date to today in Prague");
 context.setTeam("a", "B");
 assert.strictEqual(context.pickState.a, "B", "reused team preset must remain editable");
 context.setTeam("a", "A");
@@ -240,16 +244,55 @@ elements.get("venueInput").value = "CZU Gully Arena";
 elements.get("teamAName").value = "Team A";
 elements.get("teamBName").value = "Team B";
 elements.get("oversInput").value = "8";
+elements.get("matchDateInput").value = "2026-08-26";
 context.setupDone();
 assert(context.active, "setupDone should create a fresh active match");
 assert.strictEqual(context.active.offlineMatchId, "apk-match-test-uuid", "new reused setup should get a fresh offlineMatchId");
 assert.strictEqual(context.active.syncVersion, 1, "new reused setup should reset syncVersion");
 assert.strictEqual(context.active.startedAt != null, true, "new reused setup should get fresh startedAt");
+assert.strictEqual(context.active.matchDate, "2026-08-26", "new reused setup should store explicit Match Date");
 assert.strictEqual(context.active.completedAt, null, "new reused setup must not carry completedAt");
 assert.strictEqual(context.active.innings.length, 0, "new reused setup must not carry previous innings/events");
 assert.strictEqual(context.active.result, "", "new reused setup must not carry result");
 assert.strictEqual(context.active.potm, null, "new reused setup must not carry POM");
 assert.strictEqual(context.active.syncState, "pending_sync", "new reused setup should start with APK pending sync state");
+context.save();
+context.active = null;
+context.load();
+assert.strictEqual(context.active.matchDate, "2026-08-26", "explicit Match Date should survive local save and reload");
+const syncReadyActive = {
+  ...context.active,
+  innings: [{ batting: "A", openers: { s: "a", ns: null }, events: [{ t: "bowler", id: "b" }] }],
+};
+assert.strictEqual(context.convertMatch(syncReadyActive).matchDate, "2026-08-26", "sync payload should include exact explicit Match Date");
+
+const adjacentStartedAtMatch = {
+  ...syncReadyActive,
+  matchDate: "2026-08-26",
+  startedAt: "2026-08-25T21:58:00.000Z",
+  date: "2026-08-25T21:58:00.000Z",
+};
+assert.strictEqual(
+  context.convertMatch(adjacentStartedAtMatch).matchDate,
+  "2026-08-26",
+  "explicit Match Date should win over adjacent startedAt timestamp"
+);
+assert.strictEqual(
+  context.pragueMatchDateFromTimestamp("2026-08-25T22:30:00.000Z"),
+  "2026-08-26",
+  "legacy fallback should derive Prague date without UTC slicing"
+);
+assert.strictEqual(
+  context.convertMatch({ ...syncReadyActive, matchDate: undefined, startedAt: "2026-08-25T22:30:00.000Z", date: "2026-08-25T22:30:00.000Z" }).matchDate,
+  "2026-08-26",
+  "legacy local matches without explicit Match Date should use Prague startedAt fallback"
+);
+assert.strictEqual(context.isIsoCalendarDate("2026-08-26"), true, "valid Match Date should pass APK validation");
+assert.strictEqual(context.isIsoCalendarDate("2026-02-29"), false, "invalid calendar dates should fail APK validation");
+context.active.isDemo = true;
+assert.strictEqual(context.convertMatch({ ...syncReadyActive, isDemo: true }).isDemo, true, "demo state should remain in sync payload");
+assert.strictEqual(context.convertMatch({ ...syncReadyActive, isDemo: true }).matchDate, "2026-08-26", "demo sync payload should still carry explicit Match Date");
+context.active.isDemo = false;
 
 function editorMatch(event, battingMode = "two_batter") {
   return {

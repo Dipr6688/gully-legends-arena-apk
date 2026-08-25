@@ -151,6 +151,8 @@ footer{position:fixed;bottom:0;left:0;right:0;text-align:center;color:#3d4a66;fo
   <div class="card">
     <label class="fld" style="margin-top:0">Match name</label>
     <input type="text" id="matchNameInput" maxlength="40">
+    <label class="fld">Match date</label>
+    <input type="date" id="matchDateInput" required>
     <label class="fld">Venue</label>
     <input type="text" id="venueInput" value="ČZU Gully Arena" maxlength="40">
     <label class="fld">Team names</label>
@@ -335,6 +337,34 @@ function makeOfflineMatchId(prefix){
   }catch(e){}
   return prefix+'-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
 }
+function pad2(n){return String(n).padStart(2,'0')}
+function formatPragueCalendarDate(value){
+  var date=value instanceof Date?value:new Date(value);
+  if(!Number.isFinite(date.getTime()))return null;
+  try{
+    var parts=new Intl.DateTimeFormat('en-GB',{
+      timeZone:'Europe/Prague',year:'numeric',month:'2-digit',day:'2-digit'
+    }).formatToParts(date);
+    var year=parts.find(function(part){return part.type==='year'}).value;
+    var month=parts.find(function(part){return part.type==='month'}).value;
+    var day=parts.find(function(part){return part.type==='day'}).value;
+    return year+'-'+month+'-'+day;
+  }catch(e){
+    return date.getFullYear()+'-'+pad2(date.getMonth()+1)+'-'+pad2(date.getDate());
+  }
+}
+function currentPragueMatchDate(){
+  return formatPragueCalendarDate(new Date())||new Date().toISOString().slice(0,10);
+}
+function pragueMatchDateFromTimestamp(value){
+  return formatPragueCalendarDate(value);
+}
+function isIsoCalendarDate(value){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||'')))return false;
+  var parts=String(value).split('-').map(function(part){return parseInt(part,10)});
+  var date=new Date(Date.UTC(parts[0],parts[1]-1,parts[2]));
+  return date.getUTCFullYear()===parts[0]&&date.getUTCMonth()===parts[1]-1&&date.getUTCDate()===parts[2];
+}
 function normalizeSyncState(state,hasOfflineId,isFinished,isActive){
   if(!hasOfflineId&&isFinished&&!isActive)return 'legacy_local';
   if(state==='pending')return 'pending_sync';
@@ -350,6 +380,7 @@ function migrateMatchShape(m,isActive){
   if(!m.syncVersion||m.syncVersion<1)m.syncVersion=1;
   if(m.isDemo!==true)m.isDemo=false;
   if(!m.startedAt)m.startedAt=m.date||new Date().toISOString();
+  if(!m.matchDate&&isActive)m.matchDate=pragueMatchDateFromTimestamp(m.startedAt)||currentPragueMatchDate();
   if(m.finished&&!m.completedAt)m.completedAt=m.date||m.startedAt;
   if(!m.rules)m.rules={};
   m.rules.wide=true;
@@ -684,10 +715,13 @@ function convertMatch(m){
   if(m.innings[1])replay(m,1,replay(m,0,null).score+1,i1);
   var evA=(m.innings[0].batting==='A')?i0:i1;
   var evB=(m.innings[0].batting==='A')?i1:i0;
+  var calendarMatchDate=isIsoCalendarDate(m.matchDate)?m.matchDate:pragueMatchDateFromTimestamp(m.startedAt||m.date);
+  if(!calendarMatchDate)throw new Error('Match date is required before sync.');
   return {
     offlineMatchId:m.offlineMatchId,
     syncVersion:m.syncVersion||1,
     isDemo:m.isDemo===true,
+    matchDate:calendarMatchDate,
     startedAt:m.startedAt||m.date,
     completedAt:m.completedAt||null,
     matchName:m.matchName||('Gully Match '+String(m.date||'').slice(0,10)),
@@ -975,6 +1009,7 @@ function prepareMatchSetup(template){
     }
   }
   document.getElementById('matchNameInput').value='Gully Match '+d.getDate()+'/'+(d.getMonth()+1);
+  document.getElementById('matchDateInput').value=currentPragueMatchDate();
   document.getElementById('venueInput').value='ČZU Gully Arena';
   document.getElementById('teamAName').value='Team A';
   document.getElementById('teamBName').value='Team B';
@@ -1071,13 +1106,15 @@ function setupDone(){
   var perSide=A.length+(shared?1:0);
   if(battingModeSel==='two_batter'&&perSide<2){alert('Two-batter mode needs at least 2 batters per side. Use One batter mode or add players.');return}
   if(!overs||overs<1||overs>50){alert('Overs must be between 1 and 50.');return}
+  var matchDate=document.getElementById('matchDateInput').value.trim();
+  if(!isIsoCalendarDate(matchDate)){alert('Pick a valid Match Date.');return}
   var teamMembers={};A.concat(B).forEach(function(id){teamMembers[id]=1});
   var helpers=Object.keys(helperState).filter(function(id){return teamMembers[id]&&id!==shared});
   var namesnap={};roster.forEach(function(p){namesnap[p.id]=p.name});
   var now=new Date().toISOString();
   active={
     id:Date.now(),offlineMatchId:makeOfflineMatchId('apk-match'),syncVersion:1,isDemo:demoModeSel,
-    date:now,startedAt:now,completedAt:null,
+    date:now,startedAt:now,completedAt:null,matchDate:matchDate,
     matchName:document.getElementById('matchNameInput').value.trim()||('Gully Match '+new Date().toISOString().slice(0,10)),
     venue:document.getElementById('venueInput').value.trim()||'ČZU Gully Arena',
     teamA:{name:document.getElementById('teamAName').value.trim()||'Team A',ids:shared?A.concat([shared]):A},
