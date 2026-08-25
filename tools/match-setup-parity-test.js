@@ -294,6 +294,53 @@ assert.strictEqual(context.convertMatch({ ...syncReadyActive, isDemo: true }).is
 assert.strictEqual(context.convertMatch({ ...syncReadyActive, isDemo: true }).matchDate, "2026-08-26", "demo sync payload should still carry explicit Match Date");
 context.active.isDemo = false;
 
+function pomRecommendationMatch({ scorer = "a", shared = null, potm = null, isDemo = false } = {}) {
+  const teamAIds = shared ? ["a", shared] : ["a", "b"];
+  const teamBIds = shared ? ["x", shared] : ["x", "y"];
+  const striker = scorer;
+  const nonStriker = teamAIds.find((id) => id !== striker) || null;
+
+  return {
+    ...syncReadyActive,
+    isDemo,
+    shared,
+    potm,
+    teamA: { name: "Team A", ids: teamAIds },
+    teamB: { name: "Team B", ids: teamBIds },
+    innings: [
+      {
+        batting: "A",
+        openers: { s: striker, ns: nonStriker },
+        events: [{ t: "bowler", id: "x" }, { t: "run", r: 6 }],
+      },
+    ],
+  };
+}
+
+const uniquePomPayload = context.convertMatch(pomRecommendationMatch());
+assert.strictEqual(uniquePomPayload.pomRecommendationPlayerId, "a", "unique highest pre-POM XP should sync the stable player id");
+
+const tiePomPayload = context.convertMatch({
+  ...pomRecommendationMatch(),
+  innings: [{ batting: "A", openers: { s: "a", ns: "b" }, events: [{ t: "bowler", id: "x" }] }],
+});
+assert.strictEqual(tiePomPayload.pomRecommendationPlayerId, null, "exact pre-POM XP tie should sync no recommendation");
+
+const sharedPomPayload = context.convertMatch(pomRecommendationMatch({ scorer: "s", shared: "s" }));
+assert.strictEqual(sharedPomPayload.pomRecommendationPlayerId, "s", "Shared Player may be synced as the APK POM recommendation");
+
+const demoPomPayload = context.convertMatch(pomRecommendationMatch({ isDemo: true }));
+assert.strictEqual(demoPomPayload.isDemo, true, "demo recommendation payload should remain demo");
+assert.strictEqual(demoPomPayload.pomRecommendationPlayerId, "a", "demo matches may carry a recommendation without becoming official");
+
+const manualPomPayload = context.convertMatch(pomRecommendationMatch({ potm: "b" }));
+assert.strictEqual(manualPomPayload.pomRecommendationPlayerId, "a", "POM +15 preview bonus must not influence the synced recommendation");
+assert.strictEqual(
+  Object.prototype.hasOwnProperty.call(manualPomPayload, "selectedPlayerOfMatchId"),
+  false,
+  "APK sync must not send an authoritative selected Player of the Match"
+);
+
 function editorMatch(event, battingMode = "two_batter") {
   return {
     id: `editor-${Math.random().toString(36).slice(2)}`,

@@ -30,9 +30,12 @@ assert(convertMatch.includes("offlineMatchId"), "app-sync payload must include o
 assert(convertMatch.includes("syncVersion"), "app-sync payload must include syncVersion");
 assert(convertMatch.includes("isDemo"), "app-sync payload must include isDemo");
 assert(convertMatch.includes("matchDate"), "app-sync payload must include explicit matchDate");
+assert(convertMatch.includes("pomRecommendationPlayerId"), "app-sync payload must include recommendation-only POM field");
+assert(convertMatch.includes("computeXP(m)"), "POM recommendation must reuse the APK match XP preview");
+assert(convertMatch.includes("xp.recommended||null"), "POM recommendation should send null when there is no unique recommendation");
 assert(convertMatch.includes("startedAt"), "app-sync payload must include startedAt");
 assert(convertMatch.includes("completedAt"), "app-sync payload must include completedAt");
-["matchNumber", "playerOfMatchId", "expectedUpdatedAt"].forEach((field) => {
+["matchNumber", "selectedPlayerOfMatchId", "playerOfMatchId", "officialPOM", "expectedUpdatedAt"].forEach((field) => {
   assert(!convertMatch.includes(field), `app-sync payload must not send ${field}`);
 });
 

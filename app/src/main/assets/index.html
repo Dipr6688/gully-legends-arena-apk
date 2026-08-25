@@ -717,11 +717,13 @@ function convertMatch(m){
   var evB=(m.innings[0].batting==='A')?i1:i0;
   var calendarMatchDate=isIsoCalendarDate(m.matchDate)?m.matchDate:pragueMatchDateFromTimestamp(m.startedAt||m.date);
   if(!calendarMatchDate)throw new Error('Match date is required before sync.');
+  var xp=computeXP(m);
   return {
     offlineMatchId:m.offlineMatchId,
     syncVersion:m.syncVersion||1,
     isDemo:m.isDemo===true,
     matchDate:calendarMatchDate,
+    pomRecommendationPlayerId:xp.recommended||null,
     startedAt:m.startedAt||m.date,
     completedAt:m.completedAt||null,
     matchName:m.matchName||('Gully Match '+String(m.date||'').slice(0,10)),
