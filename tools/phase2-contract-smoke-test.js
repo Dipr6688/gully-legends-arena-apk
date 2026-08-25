@@ -56,6 +56,10 @@ assert(indexHtml.includes("gla_skip_auto_sync_once"), "migrated data must skip f
 assert(indexHtml.includes("function apiUrl(path)"), "same-origin API URL helper is missing");
 assert(indexHtml.includes("return path;"), "same-origin API requests should use relative /api paths");
 assert(indexHtml.includes("describeApiError"), "network diagnostics helper is missing");
+assert(indexHtml.includes("/api/app-sync/team-balance"), "server-backed Balance Teams endpoint is missing");
+assert(indexHtml.includes("Balance Again"), "Balance Again setup action is missing");
+assert(indexHtml.includes("BALANCE TEAMS NEEDS INTERNET"), "offline Balance Teams message is missing");
+assert(!/privateBalanceRatings|prohibitedPairs|batting:\s*[1-5]|bowling:\s*[1-5]|fielding:\s*[1-5]/.test(indexHtml), "APK must not contain private balance ratings or rules");
 
 assert(manifest.includes('android:allowBackup="false"'), "Android backup must be disabled");
 assert(!buildGradle.includes('storePassword "'), "Gradle must not hardcode storePassword");

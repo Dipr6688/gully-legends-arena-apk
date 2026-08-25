@@ -599,4 +599,84 @@ assert.strictEqual(finalUndoState.closed, false, "final-over undo should remove 
 assert.strictEqual(finalUndoState.balls, 5, "final-over undo should restore five legal balls");
 assert.strictEqual(finalUndoState.score, 0, "final-over undo should reverse final delivery score");
 
-console.log("APK match setup parity test passed.");
+function resetSetupForBalance() {
+  context.roster = roster(["a", "b", "c", "d", "x", "y", "z", "s"]);
+  context.pickState = {};
+  context.helperState = {};
+  context.setupNoticeText = "";
+  context.setupBalancedOnce = false;
+}
+
+resetSetupForBalance();
+context.applyBalancedTeams(
+  { teamAPlayerIds: ["a", "b"], teamBPlayerIds: ["x", "y"], sharedPlayerId: null },
+  ["a", "b", "x", "y"],
+);
+assert.strictEqual(context.pickState.a, "A", "balanced response should populate Team A");
+assert.strictEqual(context.pickState.b, "A", "balanced response should populate all Team A ids");
+assert.strictEqual(context.pickState.x, "B", "balanced response should populate Team B");
+assert.strictEqual(context.pickState.y, "B", "balanced response should populate all Team B ids");
+assert.strictEqual(context.setupBalancedOnce, true, "successful balance should enable Balance Again label");
+context.setTeam("a", "B");
+assert.strictEqual(context.pickState.a, "B", "balanced result remains manually editable");
+assert.strictEqual(context.setupBalancedOnce, false, "manual edit returns the setup to normal Balance Teams mode");
+
+resetSetupForBalance();
+context.helperState.s = true;
+context.helperState.a = true;
+context.applyBalancedTeams(
+  { teamAPlayerIds: ["a"], teamBPlayerIds: ["b"], sharedPlayerId: "s" },
+  ["a", "b", "s"],
+);
+assert.strictEqual(context.pickState.s, "S", "odd attendance balance should retain Shared Player");
+assert.strictEqual(context.helperState.s, undefined, "Shared Player should be removed from helper selections");
+assert.strictEqual(context.helperState.a, true, "valid helper selections may remain after balance");
+
+assert(html.includes("/api/app-sync/team-balance"), "APK should call the authenticated app-sync balance endpoint");
+assert(html.includes("Balance Again"), "APK should offer Balance Again after a server balance result");
+assert(html.includes("Choose Shared Player"), "odd attendance should ask for Shared Player before balancing");
+assert(html.includes("BALANCE TEAMS NEEDS INTERNET"), "offline balance failure should keep manual setup available");
+assert(!/privateBalanceRatings|batting:\s*[1-5]|bowling:\s*[1-5]|fielding:\s*[1-5]|prohibitedPairs/.test(html), "APK asset must not contain private balance ratings or rules");
+assert(context.convertMatch.toString().includes("pomRecommendationPlayerId"), "sync payload should keep POM recommendation support");
+assert(!context.convertMatch.toString().includes("teamBalance"), "sync payload should not reveal how teams were created");
+
+async function runBalanceRequestTests() {
+  resetSetupForBalance();
+  context.settings.accessToken = "token";
+  context.fetch = function (_url, opts) {
+    const body = JSON.parse(opts.body);
+    assert.deepStrictEqual(body, {
+      playerIds: ["a", "b", "x", "y"],
+      sharedPlayerId: null,
+    }, "authenticated balance request should send only ids and Shared Player");
+    assert.strictEqual(opts.headers.Authorization, "Bearer token", "balance request should use Admin bearer token");
+    return Promise.resolve({
+      status: 200,
+      json: () => Promise.resolve({
+        teamAPlayerIds: ["a", "x"],
+        teamBPlayerIds: ["b", "y"],
+        sharedPlayerId: null,
+      }),
+    });
+  };
+  let ok = await context.requestBalanceTeams(["a", "b", "x", "y"], null);
+  assert.strictEqual(ok.ok, true, "authenticated balance request should succeed");
+  assert.deepStrictEqual(ok.j.teamAPlayerIds, ["a", "x"], "balance response should be returned to setup");
+
+  context.fetch = function () {
+    return Promise.resolve({ status: 0, json: () => Promise.resolve({}) });
+  };
+  let offline = await context.requestBalanceTeams(["a", "b", "x", "y"], null);
+  assert.strictEqual(offline.ok, false, "offline balance should fail safely");
+  assert.match(offline.msg, /BALANCE TEAMS NEEDS INTERNET/);
+  assert.deepStrictEqual(context.pickState, {}, "offline balance must not clear setup selections");
+}
+
+runBalanceRequestTests()
+  .then(function () {
+    console.log("APK match setup parity test passed.");
+  })
+  .catch(function (error) {
+    console.error(error);
+    process.exit(1);
+  });

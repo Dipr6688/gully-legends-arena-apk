@@ -40,6 +40,7 @@ td.r,th.r{text-align:right}
 .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .seg button{flex:1;padding:10px 2px;background:var(--card2);color:var(--dim);border:none;font-size:13px;font-weight:600}
 .seg button.sel{background:var(--green);color:#06210f}
+.seg button.selP{background:var(--blue);color:#fff}
 .seg button.selB{background:var(--gold);color:#241a00}
 .seg button.selAB{background:var(--purple);color:#1d1040}
 .tgl{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid rgba(38,51,79,.5)}
@@ -171,10 +172,12 @@ footer{position:fixed;bottom:0;left:0;right:0;text-align:center;color:#3d4a66;fo
     <div class="sub" style="margin-top:6px">Demo matches can be uploaded for Admin review, but they do not become official finalised cricket records.</div>
   </div>
   <div class="card">
-    <label class="fld" style="margin-top:0">Pick teams — A, B, or ⭐ Shared (plays for both)</label>
-    <div class="sub" style="margin-bottom:8px">Teams must be equal. One shared player max — use them to balance an odd group.</div>
+    <label class="fld" style="margin-top:0">Pick players — IN, A, B, or ⭐ Shared</label>
+    <div class="sub" style="margin-bottom:8px">Use IN for players available today, then Balance Teams or assign A/B manually. One shared player max for odd groups.</div>
     <div id="setupNotice" class="notice" style="display:none"></div>
     <div id="sharedHint" class="sub" style="margin-bottom:8px"></div>
+    <button class="btn gold" id="btnBalanceTeams" onclick="balanceTeamsFromSetup()">Balance Teams</button>
+    <div class="sub" style="margin-bottom:8px">Needs internet and Admin login. You can still build or edit teams manually.</div>
     <div id="teamPickList"></div>
   </div>
   <div class="card">
@@ -950,7 +953,7 @@ function profile(id){
 }
 
 /* ================= SETUP ================= */
-var pickState={},helperState={},battingModeSel='two_batter',demoModeSel=false,setupNoticeText='';
+var pickState={},helperState={},battingModeSel='two_batter',demoModeSel=false,setupNoticeText='',setupBalancedOnce=false;
 function currentRosterSet(){
   var s={};
   roster.forEach(function(p){s[p.id]=1});
@@ -998,7 +1001,7 @@ function previousSetupTemplate(){
 }
 function prepareMatchSetup(template){
   var d=new Date();
-  pickState={};helperState={};battingModeSel='two_batter';demoModeSel=false;setupNoticeText='';
+  pickState={};helperState={};battingModeSel='two_batter';demoModeSel=false;setupNoticeText='';setupBalancedOnce=false;
   if(template){
     template.a.forEach(function(id){pickState[id]='A'});
     template.b.forEach(function(id){pickState[id]='B'});
@@ -1044,9 +1047,85 @@ function setDemoMode(on){
   var sw=document.getElementById('demoMatchSw');
   if(sw)sw.className='sw '+(demoModeSel?'on':'');
 }
+function setupSelectedIds(){
+  return roster.filter(function(p){return pickState[p.id]==='P'||pickState[p.id]==='A'||pickState[p.id]==='B'||pickState[p.id]==='S'}).map(function(p){return p.id});
+}
+function setupSharedId(){
+  var shared=roster.filter(function(p){return pickState[p.id]==='S'}).map(function(p){return p.id});
+  return shared.length?shared[0]:null;
+}
+function applyBalancedTeams(result,selectedIds){
+  var selected={};selectedIds.forEach(function(id){selected[id]=1});
+  var aSet={},bSet={};
+  (result.teamAPlayerIds||[]).forEach(function(id){aSet[id]=1});
+  (result.teamBPlayerIds||[]).forEach(function(id){bSet[id]=1});
+  roster.forEach(function(p){
+    if(!selected[p.id]){pickState[p.id]='';return}
+    if(result.sharedPlayerId&&p.id===result.sharedPlayerId)pickState[p.id]='S';
+    else if(aSet[p.id])pickState[p.id]='A';
+    else if(bSet[p.id])pickState[p.id]='B';
+    else pickState[p.id]='P';
+  });
+  Object.keys(helperState).forEach(function(id){
+    if(pickState[id]!=='A'&&pickState[id]!=='B')delete helperState[id];
+  });
+  setupBalancedOnce=true;
+  setupNoticeText='Teams balanced by gullylegends.eu. You can still edit them manually.';
+  renderSetup();
+}
+function requestBalanceTeams(selectedIds,shared){
+  if(!settings.accessToken)return Promise.resolve({ok:false,msg:'Log in first — open Sync & Settings.'});
+  return api('/api/app-sync/team-balance',{playerIds:selectedIds,sharedPlayerId:shared},settings.accessToken).then(function(res){
+    if((res.status===401||res.status===403)&&settings.refreshToken){
+      return doRefresh().then(function(ok){
+        if(!ok)return {ok:false,msg:describeApiError(res,'Balance Teams failed')};
+        return api('/api/app-sync/team-balance',{playerIds:selectedIds,sharedPlayerId:shared},settings.accessToken).then(function(retry){
+          if(retry.status===200&&retry.j&&Array.isArray(retry.j.teamAPlayerIds)&&Array.isArray(retry.j.teamBPlayerIds))return {ok:true,j:retry.j};
+          return {ok:false,msg:(retry.j&&retry.j.error)||describeApiError(retry,'Balance Teams failed')};
+        });
+      });
+    }
+    if(res.status===200&&res.j&&Array.isArray(res.j.teamAPlayerIds)&&Array.isArray(res.j.teamBPlayerIds))return {ok:true,j:res.j};
+    if(res.status===0)return {ok:false,msg:'BALANCE TEAMS NEEDS INTERNET. YOU CAN STILL BUILD TEAMS MANUALLY OR USE PREVIOUS TEAMS.'};
+    return {ok:false,msg:(res.j&&res.j.error)||describeApiError(res,'Balance Teams failed')};
+  }).catch(function(){
+    return {ok:false,msg:'BALANCE TEAMS NEEDS INTERNET. YOU CAN STILL BUILD TEAMS MANUALLY OR USE PREVIOUS TEAMS.'};
+  });
+}
+function balanceTeamsFromSetup(){
+  var selectedIds=setupSelectedIds(),shared=setupSharedId();
+  if(selectedIds.length<2){setupNoticeText='Select players for this match first.';renderSetup();return}
+  if(selectedIds.length%2===1&&!shared){
+    var h='<h3>Choose Shared Player</h3><div class="sub" style="margin-bottom:10px">Odd attendance needs one player who appears for both teams.</div>';
+    selectedIds.forEach(function(id){
+      h+='<button class="pick" onclick="closeModal();setBalanceSharedAndRun('+jid(id)+')">'+esc(pname(id))+'</button>';
+    });
+    showModal(h);
+    return;
+  }
+  if(selectedIds.length%2===0&&shared){
+    setupNoticeText='Even attendance does not need a Shared Player. Remove Shared or pick an odd group.';
+    renderSetup();
+    return;
+  }
+  var btn=document.getElementById('btnBalanceTeams');
+  if(btn)btn.disabled=true;
+  setupNoticeText='Asking gullylegends.eu to balance the teams...';
+  renderSetup();
+  requestBalanceTeams(selectedIds,shared).then(function(result){
+    if(result.ok)applyBalancedTeams(result.j,selectedIds);
+    else{setupNoticeText=result.msg||'BALANCE TEAMS NEEDS INTERNET. YOU CAN STILL BUILD TEAMS MANUALLY OR USE PREVIOUS TEAMS.';renderSetup();}
+  });
+}
+function setBalanceSharedAndRun(id){
+  Object.keys(pickState).forEach(function(k){if(pickState[k]==='S')pickState[k]='P'});
+  pickState[id]='S';
+  if(helperState[id])delete helperState[id];
+  balanceTeamsFromSetup();
+}
 function renderSetup(){
   setDemoMode(demoModeSel);
-  var selected=roster.filter(function(p){return pickState[p.id]==='A'||pickState[p.id]==='B'||pickState[p.id]==='S'}).length;
+  var selected=setupSelectedIds().length;
   var shared=roster.filter(function(p){return pickState[p.id]==='S'}).length;
   var notice=document.getElementById('setupNotice');
   if(notice){
@@ -1059,11 +1138,14 @@ function renderSetup(){
     else if(shared)hint.textContent='Even attendance: Shared player is usually only needed for odd groups.';
     else hint.textContent='Even attendance: build Team A and Team B directly.';
   }
+  var balanceBtn=document.getElementById('btnBalanceTeams');
+  if(balanceBtn){balanceBtn.textContent=setupBalancedOnce?'Balance Again':'Balance Teams';balanceBtn.disabled=false}
   var el=document.getElementById('teamPickList');
   el.innerHTML=roster.map(function(p){
     var s=pickState[p.id]||'';
     return '<div class="rosterrow"><div class="grow" style="font-weight:600">'+esc(p.name)+'</div>'+
-    '<div class="seg" style="width:196px">'+
+    '<div class="seg" style="width:244px">'+
+    '<button class="'+(s==='P'?'selP':'')+'" onclick="setTeam('+jid(p.id)+',\'P\')">IN</button>'+
     '<button class="'+(s==='A'?'sel':'')+'" onclick="setTeam('+jid(p.id)+',\'A\')">A</button>'+
     '<button class="'+(s===''?'sel':'')+'" style="'+(s===''?'background:#26334f;color:#8b98b3':'')+'" onclick="setTeam('+jid(p.id)+',\'\')">–</button>'+
     '<button class="'+(s==='B'?'selB':'')+'" onclick="setTeam('+jid(p.id)+',\'B\')">B</button>'+
@@ -1074,10 +1156,10 @@ function renderSetup(){
 }
 function setTeam(id,t){
   if(t==='S'){
-    Object.keys(pickState).forEach(function(k){if(pickState[k]==='S')pickState[k]=''});
+    Object.keys(pickState).forEach(function(k){if(pickState[k]==='S')pickState[k]='P'});
   }
   pickState[id]=t;
-  setupNoticeText='';
+  setupNoticeText='';setupBalancedOnce=false;
   if(helperState[id])delete helperState[id];
   renderSetup();
 }
@@ -1096,6 +1178,8 @@ function toggleHelper(id){
   renderHelpers();
 }
 function setupDone(){
+  var unassigned=roster.filter(function(p){return pickState[p.id]==='P'}).map(function(p){return p.id});
+  if(unassigned.length){alert('Assign all IN players to Team A, Team B, or Shared before continuing.');return}
   var A=roster.filter(function(p){return pickState[p.id]==='A'}).map(function(p){return p.id});
   var B=roster.filter(function(p){return pickState[p.id]==='B'}).map(function(p){return p.id});
   var S=roster.filter(function(p){return pickState[p.id]==='S'}).map(function(p){return p.id});
