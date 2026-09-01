@@ -319,6 +319,10 @@ function pomRecommendationMatch({ scorer = "a", shared = null, potm = null, isDe
 
 const uniquePomPayload = context.convertMatch(pomRecommendationMatch());
 assert.strictEqual(uniquePomPayload.pomRecommendationPlayerId, "a", "unique highest pre-POM XP should sync the stable player id");
+const septemberPomPayload = context.convertMatch({ ...pomRecommendationMatch(), matchDate: "2026-09-01" });
+assert.strictEqual(septemberPomPayload.matchDate, "2026-09-01", "V2 sync should preserve the exact authoritative Match Date");
+assert.strictEqual(septemberPomPayload.pomRecommendationPlayerId, "a", "V2 informational POM recommendation should still be synced");
+assert.strictEqual(Object.prototype.hasOwnProperty.call(septemberPomPayload, "xpRuleVersion"), false, "APK must not send an authoritative XP rule version");
 
 const tiePomPayload = context.convertMatch({
   ...pomRecommendationMatch(),
@@ -340,6 +344,180 @@ assert.strictEqual(
   false,
   "APK sync must not send an authoritative selected Player of the Match"
 );
+
+const replayBackedViews = context.views;
+const replayBackedWinnerKey = context.winnerKey;
+context.views = function (match) { return match.__xpViews; };
+context.winnerKey = function (match) { return match.__winner || null; };
+
+function xpView({ batting = "A", batsmen = {}, bowlers = {}, maidens = {}, hattricks = {}, damage = {}, fielding = {}, overs = [] } = {}) {
+  return { batting, batsmen, bowlers, maidens, hattricks, damage, fielding, overs };
+}
+
+function xpFixture({
+  matchDate = "2026-09-01",
+  startedAt = "2026-09-01T10:00:00.000Z",
+  teamAIds = ["a"],
+  teamBIds = ["x"],
+  shared = null,
+  helpers = [],
+  potm = null,
+  winner = null,
+  views = [],
+} = {}) {
+  return {
+    id: `xp-${Math.random().toString(36).slice(2)}`,
+    matchDate,
+    startedAt,
+    date: startedAt,
+    teamA: { name: "Team A", ids: teamAIds },
+    teamB: { name: "Team B", ids: teamBIds },
+    shared,
+    helpers,
+    potm,
+    __winner: winner,
+    __xpViews: views,
+  };
+}
+
+function battingPreview({ runs = 0, didBat = true, wasOut = false, matchDate = "2026-09-01", startedAt } = {}) {
+  return context.computeXP(xpFixture({
+    matchDate,
+    startedAt: startedAt || `${matchDate}T10:00:00.000Z`,
+    views: [xpView({ batsmen: { a: { runs, didBat, out: wasOut } } })],
+  })).players.a;
+}
+
+assert.strictEqual(context.xpRuleVersionForMatch({ matchDate: "2026-08-31" }), "v1", "31 August must use APK XP V1 preview");
+assert.strictEqual(context.xpRuleVersionForMatch({ matchDate: "2026-09-01" }), "v2", "1 September must use APK XP V2 preview");
+assert.strictEqual(
+  context.xpRuleVersionForMatch({ matchDate: "2026-08-31", startedAt: "2026-09-10T10:00:00.000Z" }),
+  "v1",
+  "an August match edited or synced in September must remain V1"
+);
+
+const historicalV1 = battingPreview({ runs: 160, matchDate: "2026-08-31", startedAt: "2026-09-10T10:00:00.000Z" });
+assert.strictEqual(historicalV1.ruleVersion, "v1", "historical previews must identify V1");
+assert.strictEqual(historicalV1.runsXP, 30, "V1 regular batting cap must remain 30");
+assert.strictEqual(historicalV1.milestone, 40, "V1 century milestones must remain cumulative");
+assert.strictEqual(historicalV1.preTotal, 90, "V1 pre-POM behavior must remain unchanged");
+
+[
+  [50, 25], [60, 30], [61, 30], [64, 31], [80, 35],
+  [100, 40], [140, 50], [160, 55], [200, 65],
+].forEach(function ([runs, expected]) {
+  assert.strictEqual(context.v2RawRegularBattingPoints(runs), expected, `${runs} runs should use the V2 raw batting bands`);
+});
+
+[
+  [50, 40], [60, 45], [61, 45], [64, 46], [80, 50],
+  [100, 80], [140, 90], [160, 95],
+].forEach(function ([runs, expected]) {
+  assert.strictEqual(battingPreview({ runs }).rawBattingPoints, expected, `${runs} runs should produce the approved raw batting total`);
+});
+
+assert.strictEqual(battingPreview({ runs: 0, didBat: true, wasOut: true }).rawBattingPoints, -8, "dismissed zero should receive the V2 duck penalty");
+assert.strictEqual(battingPreview({ runs: 0, didBat: true, wasOut: false }).rawBattingPoints, 0, "not-out zero must not receive a duck penalty");
+assert.strictEqual(battingPreview({ runs: 0, didBat: false, wasOut: false }).rawBattingPoints, 0, "Did Not Bat must not receive a duck penalty");
+const oneSixtyPreview = battingPreview({ runs: 160 });
+assert.strictEqual(oneSixtyPreview.rawBattingPoints, 95, "raw batting must continue beyond the career regular-run cap");
+assert.strictEqual(oneSixtyPreview.bat, 90, "projected career batting must cap only regular-run points at 50");
+
+[
+  [0, 10], [1, 6], [3, 6], [4, 3], [6, 3], [7, 1], [9, 1],
+  [10, 0], [12, 0], [13, -2], [15, -2], [16, -4], [18, -4],
+  [19, -6], [21, -6], [22, -8], [24, -8], [25, -11], [29, -11],
+  [30, -15], [45, -15],
+].forEach(function ([runs, expected]) {
+  assert.strictEqual(context.v2OverQualityPoints(runs), expected, `${runs} runs should map to the approved V2 over-quality score`);
+});
+
+function bowlingPreview({ overs = [], wickets = 0, hattricks = 0, maidens = 0 } = {}) {
+  return context.computeXP(xpFixture({
+    views: [xpView({
+      batting: "B",
+      bowlers: { a: { wickets } },
+      maidens: { a: maidens },
+      hattricks: { a: hattricks },
+      overs,
+    })],
+  })).players.a;
+}
+
+const v2Maiden = bowlingPreview({ overs: [{ bowler: "a", legal: 6, runs: 0 }], maidens: 1 });
+assert.strictEqual(v2Maiden.rawBowlingPoints, 10, "a completed zero-run over must award exactly +10 raw bowling points");
+assert.strictEqual(v2Maiden.maidenXP, 0, "V2 must not add the old +5 maiden reward");
+assert.strictEqual(v2Maiden.bowl, 10, "V2 projected bowling must count the maiden quality score once");
+assert.strictEqual(bowlingPreview({ overs: [{ bowler: "a", legal: 5, runs: 0 }] }).rawBowlingPoints, 0, "an incomplete over must receive no quality score");
+const stackedBowling = bowlingPreview({ overs: [{ bowler: "a", legal: 6, runs: 0 }], wickets: 3, hattricks: 1 });
+assert.strictEqual(stackedBowling.rawBowlingPoints, 65, "wickets and a hat-trick must stack with over quality");
+assert.strictEqual(bowlingPreview({ overs: [0, 0, 0, 0].map((runs) => ({ bowler: "a", legal: 6, runs })) }).rawBowlingPoints, 40, "raw positive over quality must remain uncapped");
+assert.strictEqual(bowlingPreview({ overs: [0, 0, 0, 0].map((runs) => ({ bowler: "a", legal: 6, runs })) }).bowl, 30, "projected positive over quality must cap at +30");
+assert.strictEqual(bowlingPreview({ overs: [30, 30].map((runs) => ({ bowler: "a", legal: 6, runs })) }).rawBowlingPoints, -30, "raw negative over quality must remain uncapped");
+assert.strictEqual(bowlingPreview({ overs: [30, 30].map((runs) => ({ bowler: "a", legal: 6, runs })) }).bowl, -20, "projected negative over quality must stop at -20");
+
+function fieldingPreview(fielding, helpers = []) {
+  return context.computeXP(xpFixture({
+    helpers,
+    views: [xpView({ fielding })],
+  }));
+}
+
+assert.strictEqual(fieldingPreview({ a: { catches: 1 } }).players.a.rawFieldingPoints, 6, "a catch must earn +6 raw fielding points");
+assert.strictEqual(fieldingPreview({ a: { runouts: 1 } }).players.a.rawFieldingPoints, 8, "a run-out must earn +8 raw fielding points");
+assert.strictEqual(fieldingPreview({ a: { stumpings: 1 } }).players.a.rawFieldingPoints, 8, "a stumping must earn +8 raw fielding points");
+const uncappedFielding = fieldingPreview({ a: { catches: 7, runouts: 1, stumpings: 1 } }).players.a;
+assert.strictEqual(uncappedFielding.rawFieldingPoints, 58, "raw fielding performance must remain uncapped");
+assert.strictEqual(uncappedFielding.fieldXP, 40, "projected career fielding must cap at 40");
+const helperFielding = fieldingPreview({ h: { catches: 1, runouts: 1, stumpings: 1 } }, ["h"]).players.h;
+assert.strictEqual(helperFielding.rawFieldingPoints, 22, "Fielding Helper catches, run-outs, and stumpings must reach the helper's local raw performance");
+
+const falseCapTie = context.computeXP(xpFixture({
+  teamAIds: ["a", "b"],
+  teamBIds: ["x"],
+  potm: "b",
+  views: [
+    xpView({ batting: "A", batsmen: {
+      a: { runs: 200, didBat: true, out: false },
+      b: { runs: 180, didBat: true, out: false },
+    } }),
+    xpView({ batting: "B", bowlers: { a: { wickets: 8 }, b: { wickets: 8 } } }),
+  ],
+}));
+assert.strictEqual(falseCapTie.players.a.total, 160, "V2 projected XP should apply the overall +160 cap");
+assert.strictEqual(falseCapTie.players.b.total, 160, "career caps may make projected totals equal");
+assert.strictEqual(falseCapTie.players.a.preTotal > falseCapTie.players.b.preTotal, true, "uncapped raw performance must keep the stronger player ahead");
+assert.strictEqual(falseCapTie.recommended, "a", "career caps must not create a false POM tie");
+assert.strictEqual(falseCapTie.players.b.preTotal, 200, "POM +15 must be excluded from the recommendation score");
+
+const trueTie = context.computeXP(xpFixture({
+  teamAIds: ["a", "b"],
+  views: [xpView({ batsmen: {
+    a: { runs: 10, didBat: true, out: false },
+    b: { runs: 10, didBat: true, out: false },
+  } })],
+}));
+assert.strictEqual(trueTie.recommended, null, "an exact highest V2 performance tie must produce no recommendation");
+assert.strictEqual(trueTie.tie, true, "an exact highest V2 tie must be exposed as a tie");
+
+const sharedPreview = context.computeXP(xpFixture({
+  teamAIds: ["a", "s"],
+  teamBIds: ["x", "s"],
+  shared: "s",
+  winner: "A",
+  views: [
+    xpView({ batting: "A", batsmen: { s: { runs: 40, didBat: true, out: false } } }),
+    xpView({ batting: "B", batsmen: { s: { runs: 20, didBat: true, out: false } } }),
+  ],
+}));
+assert.strictEqual(Object.keys(sharedPreview.players).filter((id) => id === "s").length, 1, "Shared Player must have one logical local XP performance");
+assert.strictEqual(sharedPreview.players.s.participation, 20, "Shared Player must receive one Played score");
+assert.strictEqual(sharedPreview.players.s.win, 0, "Shared Player must not receive a normal win bonus");
+assert.strictEqual(sharedPreview.players.s.rawBattingPoints, 30, "Shared Player batting should combine both team contexts once");
+assert.strictEqual(sharedPreview.recommended, "s", "Shared Player may be the unique informational POM recommendation");
+
+context.views = replayBackedViews;
+context.winnerKey = replayBackedWinnerKey;
 
 function editorMatch(event, battingMode = "two_batter") {
   return {

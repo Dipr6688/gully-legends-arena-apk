@@ -33,6 +33,7 @@ assert(convertMatch.includes("matchDate"), "app-sync payload must include explic
 assert(convertMatch.includes("pomRecommendationPlayerId"), "app-sync payload must include recommendation-only POM field");
 assert(convertMatch.includes("computeXP(m)"), "POM recommendation must reuse the APK match XP preview");
 assert(convertMatch.includes("xp.recommended||null"), "POM recommendation should send null when there is no unique recommendation");
+assert(!convertMatch.includes("xpRuleVersion"), "APK sync must not make a local XP rule version authoritative");
 assert(convertMatch.includes("startedAt"), "app-sync payload must include startedAt");
 assert(convertMatch.includes("completedAt"), "app-sync payload must include completedAt");
 ["matchNumber", "selectedPlayerOfMatchId", "playerOfMatchId", "officialPOM", "expectedUpdatedAt"].forEach((field) => {
@@ -66,8 +67,8 @@ assert(!buildGradle.includes('storePassword "'), "Gradle must not hardcode store
 assert(!buildGradle.includes('keyPassword "'), "Gradle must not hardcode keyPassword");
 assert(buildGradle.includes("signing.properties"), "Gradle must read local signing.properties");
 assert(buildGradle.includes("androidx.webkit:webkit:1.16.0"), "AndroidX WebKit dependency is missing");
-assert(buildGradle.includes("versionCode 6"), "versionCode must be incremented to 6");
-assert(buildGradle.includes('versionName "1.3.0"'), "versionName must be 1.3.0");
+assert(buildGradle.includes("versionCode 7"), "versionCode must be incremented to 7");
+assert(buildGradle.includes('versionName "1.4.0"'), "versionName must be 1.4.0");
 assert(gradleProperties.includes("android.useAndroidX=true"), "AndroidX must be enabled");
 assert(gitignore.includes("signing.properties"), "signing.properties must be ignored");
 assert(gitignore.includes("*.keystore"), "keystore files must be ignored");

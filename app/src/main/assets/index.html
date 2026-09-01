@@ -388,6 +388,7 @@ function migrateMatchShape(m,isActive){
   if(!m.rules)m.rules={};
   m.rules.wide=true;
   m.rules.nb=true;
+  ensureRosterTransitions(m);
   m.syncState=normalizeSyncState(m.syncState,hadOfflineId,!!m.finished,!!isActive);
   if(!hadOfflineId&&m.finished&&!isActive)m.syncMsg='Legacy local match. Open and edit it if you deliberately want to upload a new review copy.';
   return m;
@@ -428,7 +429,70 @@ function ov(balls){return Math.floor(balls/6)+'.'+(balls%6)}
 function allIds(m){
   var s={};m.teamA.ids.forEach(function(i){s[i]=1});m.teamB.ids.forEach(function(i){s[i]=1});
   (m.helpers||[]).forEach(function(i){s[i]=1});
+  (m.rosterTransitions||[]).forEach(function(snap){
+    (snap.teamAPlayerIds||[]).forEach(function(i){s[i]=1});
+    (snap.teamBPlayerIds||[]).forEach(function(i){s[i]=1});
+    (snap.fieldingHelperIds||[]).forEach(function(i){s[i]=1});
+    if(snap.sharedPlayerId)s[snap.sharedPlayerId]=1;
+  });
   return Object.keys(s);
+}
+function uniqueIds(ids){
+  var seen={};return (ids||[]).filter(function(id){
+    id=String(id||'');if(!id||seen[id])return false;seen[id]=1;return true;
+  }).map(String);
+}
+function currentRosterSnapshot(m){
+  var shared=m.shared||null;
+  return {
+    inningsIndex:0,eventIndex:0,
+    teamAPlayerIds:uniqueIds((m.teamA&&m.teamA.ids)||[]).filter(function(id){return id!==shared}),
+    teamBPlayerIds:uniqueIds((m.teamB&&m.teamB.ids)||[]).filter(function(id){return id!==shared}),
+    sharedPlayerId:shared,
+    fieldingHelperIds:uniqueIds(m.helpers||[]).filter(function(id){return id!==shared})
+  };
+}
+function normalizeRosterSnapshot(snap,fallback){
+  snap=snap&&typeof snap==='object'?snap:{};
+  fallback=fallback||{teamAPlayerIds:[],teamBPlayerIds:[],sharedPlayerId:null,fieldingHelperIds:[]};
+  var shared=snap.sharedPlayerId||null;
+  return {
+    inningsIndex:Math.max(0,Math.min(1,parseInt(snap.inningsIndex,10)||0)),
+    eventIndex:Math.max(0,parseInt(snap.eventIndex,10)||0),
+    teamAPlayerIds:uniqueIds(snap.teamAPlayerIds||fallback.teamAPlayerIds).filter(function(id){return id!==shared}),
+    teamBPlayerIds:uniqueIds(snap.teamBPlayerIds||fallback.teamBPlayerIds).filter(function(id){return id!==shared}),
+    sharedPlayerId:shared,
+    fieldingHelperIds:uniqueIds(snap.fieldingHelperIds||fallback.fieldingHelperIds).filter(function(id){return id!==shared}),
+    appliedAt:snap.appliedAt||null
+  };
+}
+function ensureRosterTransitions(m){
+  if(!m||!m.teamA||!m.teamB)return [];
+  var fallback=currentRosterSnapshot(m);
+  if(!Array.isArray(m.rosterTransitions)||!m.rosterTransitions.length){
+    fallback.appliedAt=m.startedAt||m.date||null;
+    m.rosterTransitions=[fallback];
+  }else{
+    m.rosterTransitions=m.rosterTransitions.map(function(snap){return normalizeRosterSnapshot(snap,fallback)});
+  }
+  return m.rosterTransitions;
+}
+function rosterSnapshotAt(m,inningsIndex,eventIndex){
+  var transitions=ensureRosterTransitions(m),best=transitions[0];
+  for(var i=0;i<transitions.length;i++){
+    var snap=transitions[i];
+    if(snap.inningsIndex>inningsIndex||(snap.inningsIndex===inningsIndex&&snap.eventIndex>eventIndex))continue;
+    best=snap;
+  }
+  return normalizeRosterSnapshot(best,currentRosterSnapshot(m));
+}
+function snapshotTeamIds(snap,k){
+  var ids=(k==='A'?snap.teamAPlayerIds:snap.teamBPlayerIds).slice();
+  if(snap.sharedPlayerId)ids.push(snap.sharedPlayerId);
+  return uniqueIds(ids);
+}
+function wasEverShared(m,id){
+  return ensureRosterTransitions(m).some(function(snap){return snap.sharedPlayerId===id});
 }
 
 /* ================= REPLAY ENGINE =================
@@ -438,19 +502,32 @@ function allIds(m){
 function replay(m,ix,target,collect){
   var inn=m.innings[ix];
   var batK=inn.batting, bat=teamOf(m,batK);
+  var activeSnap=rosterSnapshotAt(m,ix,0),currentBatIds=snapshotTeamIds(activeSnap,batK);
   var st={score:0,wickets:0,balls:0,extras:0,batsmen:{},order:[],bowlers:{},bowlOrder:{},bowlOrderList:[],
     striker:null,nonStriker:null,bowler:null,lastOverBowler:null,thisOver:[],
     closed:false,closeReason:'',needsBowler:true,needsBatsman:false,pendingWho:null,
-    fielding:{},overs:[],maidens:{},hattricks:{},damage:{},batting:batK,ignored:0};
-  bat.ids.forEach(function(id){st.batsmen[id]={runs:0,balls:0,fours:0,sixes:0,out:false,how:'',didBat:false}});
+    fielding:{},overs:[],maidens:{},hattricks:{},damage:{},batting:batK,ignored:0,
+    rosterSnapshot:activeSnap,battingIds:currentBatIds.slice(),bowlingIds:snapshotTeamIds(activeSnap,otherK(batK)),helperIds:(activeSnap.fieldingHelperIds||[]).slice()};
+  currentBatIds.forEach(function(id){st.batsmen[id]={runs:0,balls:0,fours:0,sixes:0,out:false,how:'',didBat:false}});
   st.striker=inn.openers.s;
   st.nonStriker=(m.battingMode==='single_batter')?null:(inn.openers.ns==null?null:inn.openers.ns);
   st.order=[st.striker];if(st.nonStriker!=null)st.order.push(st.nonStriker);
   if(st.batsmen[st.striker])st.batsmen[st.striker].didBat=true;
   if(st.nonStriker!=null&&st.batsmen[st.nonStriker])st.batsmen[st.nonStriker].didBat=true;
-  var maxW=Math.max(1,bat.ids.length);
+  var maxW=Math.max(1,currentBatIds.length);
   st.maxW=maxW;
   var cur=null;
+  function applyRoster(eventIndex){
+    activeSnap=rosterSnapshotAt(m,ix,eventIndex);
+    currentBatIds=snapshotTeamIds(activeSnap,batK);
+    currentBatIds.forEach(function(id){
+      if(!st.batsmen[id])st.batsmen[id]={runs:0,balls:0,fours:0,sixes:0,out:false,how:'',didBat:false};
+    });
+    maxW=Math.max(1,currentBatIds.length);
+    st.maxW=maxW;st.rosterSnapshot=activeSnap;st.battingIds=currentBatIds.slice();
+    st.bowlingIds=snapshotTeamIds(activeSnap,otherK(batK));
+    st.helperIds=(activeSnap.fieldingHelperIds||[]).slice();
+  }
   function ensureB(id){if(!st.bowlers[id]){st.bowlers[id]={balls:0,runs:0,wickets:0};st.bowlOrderList.push(id)}}
   function fEntry(id){if(!st.fielding[id])st.fielding[id]={catches:0,runouts:0,stumpings:0};return st.fielding[id]}
   function swap(){if(st.nonStriker===null)return;var t=st.striker;st.striker=st.nonStriker;st.nonStriker=t}
@@ -467,6 +544,7 @@ function replay(m,ix,target,collect){
     cur=null;
   }
   for(var i=0;i<inn.events.length;i++){
+    applyRoster(i);
     if(st.closed){st.ignored++;continue}
     var ev=inn.events[i];
     if(ev.t==='bowler'){
@@ -541,7 +619,7 @@ function replay(m,ix,target,collect){
           });
         }else{
           if(who==='striker')st.striker=-1;else st.nonStriker=-1;
-          var avail=bat.ids.filter(function(id){return !st.batsmen[id].out&&id!==st.striker&&id!==st.nonStriker});
+          var avail=currentBatIds.filter(function(id){return !st.batsmen[id].out&&id!==st.striker&&id!==st.nonStriker});
           if(avail.length===0){
             if(who==='striker')st.striker=st.nonStriker;
             st.nonStriker=null;
@@ -605,6 +683,7 @@ function replay(m,ix,target,collect){
       st.needsBowler=true;
     }
   }
+  applyRoster(inn.events.length);
   if(cur&&cur.balls.length)st.overs.push(cur);
   if(st.bowler==null)st.needsBowler=true;
   st.bowlOrder=st.bowlOrderList;
@@ -638,15 +717,38 @@ function winnerKey(m){
   return null;
 }
 
-/* ================= XP ENGINE (site-exact formulas) ================= */
+/* ================= XP ENGINE (local preview; website stays authoritative) ================= */
+var XP_V2_EFFECTIVE_DATE='2026-09-01';
 function milestoneXP(runs){if(runs>=100)return 40;if(runs>=50)return 15;return 0}
+function xpRuleVersionForMatch(m){
+  var matchDate=isIsoCalendarDate(m&&m.matchDate)?m.matchDate:pragueMatchDateFromTimestamp(m&&(m.startedAt||m.date));
+  return matchDate&&matchDate>=XP_V2_EFFECTIVE_DATE?'v2':'v1';
+}
+function v2RawRegularBattingPoints(runs){
+  runs=Math.max(0,Math.floor(Number(runs)||0));
+  return Math.floor(Math.min(runs,60)/2)+Math.floor(Math.max(runs-60,0)/4);
+}
+function v2OverQualityPoints(runs){
+  runs=Math.max(0,Math.floor(Number(runs)||0));
+  if(runs===0)return 10;
+  if(runs<=3)return 6;
+  if(runs<=6)return 3;
+  if(runs<=9)return 1;
+  if(runs<=12)return 0;
+  if(runs<=15)return -2;
+  if(runs<=18)return -4;
+  if(runs<=21)return -6;
+  if(runs<=24)return -8;
+  if(runs<=29)return -11;
+  return -15;
+}
 function computeXP(m){
-  var v=views(m),wk=winnerKey(m);
+  var v=views(m),wk=winnerKey(m),ruleVersion=xpRuleVersionForMatch(m);
   var ids=allIds(m),res={};
   // per-player stints: batting per innings + bowling + fielding + overs
   var stints={}; // id -> [{team, didBat, runs, wasOut}]
-  var bowlAgg={}, fieldAgg={}, oversBy={};
-  ids.forEach(function(id){stints[id]=[];bowlAgg[id]={wkts:0,maidens:0,hattricks:0,damage:0};fieldAgg[id]={ct:0,ro:0,st:0}});
+  var bowlAgg={}, fieldAgg={};
+  ids.forEach(function(id){stints[id]=[];bowlAgg[id]={wkts:0,maidens:0,hattricks:0,damage:0,qualityPositive:0,qualityNegative:0};fieldAgg[id]={ct:0,ro:0,st:0}});
   v.forEach(function(vw){
     if(!vw)return;
     var batTeam=vw.batting;
@@ -658,6 +760,12 @@ function computeXP(m){
     Object.keys(vw.maidens||{}).forEach(function(id){if(bowlAgg[id])bowlAgg[id].maidens+=vw.maidens[id]});
     Object.keys(vw.hattricks||{}).forEach(function(id){if(bowlAgg[id])bowlAgg[id].hattricks+=vw.hattricks[id]});
     Object.keys(vw.damage||{}).forEach(function(id){if(bowlAgg[id])bowlAgg[id].damage+=vw.damage[id]});
+    (vw.overs||[]).forEach(function(over){
+      if(!bowlAgg[over.bowler]||over.legal!==6)return;
+      var quality=v2OverQualityPoints(over.runs);
+      if(quality>0)bowlAgg[over.bowler].qualityPositive+=quality;
+      if(quality<0)bowlAgg[over.bowler].qualityNegative+=quality;
+    });
     Object.keys(vw.fielding||{}).forEach(function(id){
       var f=vw.fielding[id];if(!fieldAgg[id])return;
       fieldAgg[id].ct+=f.catches||0;fieldAgg[id].ro+=f.runouts||0;
@@ -665,27 +773,53 @@ function computeXP(m){
     });
   });
   ids.forEach(function(id){
-    var isShared=(m.shared===id);
+    var isShared=wasEverShared(m,id);
     var ps=stints[id];
     var totalRuns=ps.reduce(function(s,p){return s+(p.didBat?p.runs:0)},0);
-    var r={
-      participation:20,
-      win:(!isShared&&wk&&teamOf(m,wk).ids.indexOf(id)>-1)?5:0,
-      potm:(m.potm===id)?15:0,
-      runsXP:Math.min(30,Math.floor(totalRuns/2)),
-      milestone:ps.reduce(function(s,p){return s+(p.didBat?milestoneXP(p.runs):0)},0),
-      duck:ps.reduce(function(s,p){return s+((p.didBat&&p.wasOut&&p.runs===0)?-8:0)},0),
-      wicketXP:bowlAgg[id].wkts*10,
-      hatTrickXP:bowlAgg[id].hattricks*25,
-      maidenXP:bowlAgg[id].maidens*5,
-      damage:Math.max(-20,bowlAgg[id].damage),
-      fieldXP:Math.min(24,fieldAgg[id].ct*6+fieldAgg[id].ro*8+fieldAgg[id].st*8),
-      runs:totalRuns,wkts:bowlAgg[id].wkts,ct:fieldAgg[id].ct,ro:fieldAgg[id].ro,st:fieldAgg[id].st
-    };
-    r.bat=r.runsXP+r.milestone+r.duck;
-    r.bowl=r.wicketXP+r.hatTrickXP+r.maidenXP+r.damage;
-    r.preTotal=r.participation+r.win+r.bat+r.bowl+r.fieldXP;
-    r.total=Math.max(-15,Math.min(120,r.preTotal+r.potm));
+    var milestone=ps.reduce(function(s,p){return s+(p.didBat?milestoneXP(p.runs):0)},0);
+    var duck=ps.reduce(function(s,p){return s+((p.didBat&&p.wasOut&&p.runs===0)?-8:0)},0);
+    var participation=20;
+    var win=(!isShared&&wk&&teamOf(m,wk).ids.indexOf(id)>-1)?5:0;
+    var potm=(m.potm===id)?15:0;
+    var r;
+    if(ruleVersion==='v2'){
+      var rawRegular=v2RawRegularBattingPoints(totalRuns);
+      var rawBatting=rawRegular+milestone+duck;
+      var rawBowling=bowlAgg[id].wkts*10+bowlAgg[id].hattricks*25+bowlAgg[id].qualityPositive+bowlAgg[id].qualityNegative;
+      var rawFielding=fieldAgg[id].ct*6+fieldAgg[id].ro*8+fieldAgg[id].st*8;
+      var careerPositive=Math.min(30,bowlAgg[id].qualityPositive);
+      var careerNegative=Math.max(-20,bowlAgg[id].qualityNegative);
+      r={
+        ruleVersion:'v2',participation:participation,win:win,potm:potm,
+        runsXP:Math.min(50,rawRegular),milestone:milestone,duck:duck,
+        wicketXP:bowlAgg[id].wkts*10,hatTrickXP:bowlAgg[id].hattricks*25,
+        maidenXP:0,damage:careerNegative,overQualityXP:careerPositive+careerNegative,
+        rawPositiveOverQualityPoints:bowlAgg[id].qualityPositive,
+        rawNegativeOverQualityPoints:bowlAgg[id].qualityNegative,
+        fieldXP:Math.min(40,rawFielding),rawBattingPoints:rawBatting,
+        rawBowlingPoints:rawBowling,rawFieldingPoints:rawFielding,
+        runs:totalRuns,wkts:bowlAgg[id].wkts,ct:fieldAgg[id].ct,ro:fieldAgg[id].ro,st:fieldAgg[id].st
+      };
+      r.bat=r.runsXP+r.milestone+r.duck;
+      r.bowl=r.wicketXP+r.hatTrickXP+r.overQualityXP;
+      r.preTotal=r.participation+r.win+r.rawBattingPoints+r.rawBowlingPoints+r.rawFieldingPoints;
+      r.careerPreTotal=r.participation+r.win+r.bat+r.bowl+r.fieldXP;
+      r.total=Math.max(-15,Math.min(160,r.careerPreTotal+r.potm));
+    }else{
+      r={
+        ruleVersion:'v1',participation:participation,win:win,potm:potm,
+        runsXP:Math.min(30,Math.floor(totalRuns/2)),milestone:milestone,duck:duck,
+        wicketXP:bowlAgg[id].wkts*10,hatTrickXP:bowlAgg[id].hattricks*25,
+        maidenXP:bowlAgg[id].maidens*5,damage:Math.max(-20,bowlAgg[id].damage),
+        fieldXP:Math.min(24,fieldAgg[id].ct*6+fieldAgg[id].ro*8+fieldAgg[id].st*8),
+        runs:totalRuns,wkts:bowlAgg[id].wkts,ct:fieldAgg[id].ct,ro:fieldAgg[id].ro,st:fieldAgg[id].st
+      };
+      r.bat=r.runsXP+r.milestone+r.duck;
+      r.bowl=r.wicketXP+r.hatTrickXP+r.maidenXP+r.damage;
+      r.preTotal=r.participation+r.win+r.bat+r.bowl+r.fieldXP;
+      r.careerPreTotal=r.preTotal;
+      r.total=Math.max(-15,Math.min(120,r.preTotal+r.potm));
+    }
     res[id]=r;
   });
   // PotM recommendation from pre-PotM totals
@@ -695,7 +829,7 @@ function computeXP(m){
     if(res[id].preTotal>res[best].preTotal){best=id;tie=false}
     else if(res[id].preTotal===res[best].preTotal)tie=true;
   });
-  return {players:res,recommended:tie?null:best,tie:tie};
+  return {players:res,recommended:tie?null:best,tie:tie,ruleVersion:ruleVersion};
 }
 /* Site level ladder: advancing from level L costs 150 + 50L + 10L^2 XP */
 function xpNeeded(l){return 150+50*l+10*l*l}
@@ -740,6 +874,12 @@ function convertMatch(m){
     teamBPlayerIds:m.teamB.ids.filter(function(id){return id!==m.shared}),
     sharedPlayerId:m.shared||null,
     fieldingHelperIds:m.helpers||[],
+    rosterTransitions:ensureRosterTransitions(m).map(function(snap){return {
+      inningsIndex:snap.inningsIndex,eventIndex:snap.eventIndex,
+      teamAPlayerIds:snap.teamAPlayerIds.slice(),teamBPlayerIds:snap.teamBPlayerIds.slice(),
+      sharedPlayerId:snap.sharedPlayerId||null,fieldingHelperIds:(snap.fieldingHelperIds||[]).slice(),
+      appliedAt:snap.appliedAt||null
+    }}),
     inningsAEvents:evA,
     inningsBEvents:evB
   };
@@ -1209,7 +1349,11 @@ function setupDone(){
     overs:overs,battingMode:battingModeSel,
     rules:{wide:true,nb:true},
     stage:'toss',innings:[],current:0,finished:false,result:'',potm:null,
-    syncState:'pending_sync',syncMsg:'',serverUpdatedAt:null,lastUploadedSyncVersion:0,names:namesnap
+    syncState:'pending_sync',syncMsg:'',serverUpdatedAt:null,lastUploadedSyncVersion:0,names:namesnap,
+    rosterTransitions:[{
+      inningsIndex:0,eventIndex:0,teamAPlayerIds:A.slice(),teamBPlayerIds:B.slice(),
+      sharedPlayerId:shared,fieldingHelperIds:helpers.slice(),appliedAt:now
+    }]
   };
   save();
   go('toss');resetTossUI();
@@ -1293,6 +1437,128 @@ function openersDone(){
 function curInn(){return active.innings[active.current]}
 function curTarget(){return active.current===1?(replay(active,0,null).score+1):null}
 function curState(){return replay(active,active.current,curTarget())}
+var lateSelected={},lateRoles={},lateOdd=false,latePlayerOrder=[];
+function lateBoundary(){
+  if(active&&active.stage==='break')return {inningsIndex:1,eventIndex:0};
+  return {inningsIndex:active?active.current:0,eventIndex:(active&&curInn()&&curInn().events)?curInn().events.length:0};
+}
+function canAddLatePlayers(){
+  if(!active||active.finished)return false;
+  if(active.stage==='break')return true;
+  return active.stage==='live'&&!curState().closed;
+}
+function lateCandidates(){
+  if(!active)return [];
+  var present={};allIds(active).forEach(function(id){present[id]=1});
+  return roster.filter(function(p){return !present[p.id]});
+}
+function openLatePlayers(){
+  if(!canAddLatePlayers()){alert('Late players can only be added while an innings is active or at the innings break.');return}
+  lateSelected={};renderLatePlayerSelection();
+}
+function toggleLatePlayer(id){
+  if(lateSelected[id])delete lateSelected[id];else lateSelected[id]=true;
+  renderLatePlayerSelection();
+}
+function renderLatePlayerSelection(){
+  var choices=lateCandidates(),selected=Object.keys(lateSelected);
+  var h='<h3>Who just arrived?</h3><div class="sub" style="margin-bottom:8px">Select one or more late players. You can repeat this later.</div>';
+  if(!choices.length)h+='<div class="sub" style="margin-bottom:8px">Everyone in the roster is already in this match.</div>';
+  choices.forEach(function(p){
+    var on=!!lateSelected[p.id];
+    h+='<button class="pick" style="'+(on?'border-color:#22c55e;background:#153420':'')+'" onclick="toggleLatePlayer('+jid(p.id)+')">'+(on?'✓ ':'')+esc(p.name)+'</button>';
+  });
+  h+='<button class="btn" '+(selected.length?'':'disabled')+' onclick="continueLatePlayers()">Continue'+(selected.length?' · '+selected.length:'')+' →</button>';
+  h+='<button class="pick" onclick="closeModal()">Cancel</button>';
+  showModal(h);
+}
+function continueLatePlayers(){
+  var added=roster.filter(function(p){return !!lateSelected[p.id]}).map(function(p){return p.id});
+  if(!added.length){alert('Select at least one late player.');return}
+  var existing=allIds(active),participants=uniqueKeepOrder(existing.concat(added));
+  latePlayerOrder=participants.slice();lateRoles={};
+  var shared=active.shared||null;
+  participants.forEach(function(id){
+    if(id===shared)lateRoles[id]='S';
+    else if(active.teamA.ids.indexOf(id)>-1)lateRoles[id]='A';
+    else if(active.teamB.ids.indexOf(id)>-1)lateRoles[id]='B';
+    else lateRoles[id]='?';
+  });
+  lateOdd=participants.length%2===1;
+  if(!lateOdd&&shared){lateRoles[shared]='?';shared=null}
+  if(lateOdd&&!shared){shared=added[0]||participants[0];lateRoles[shared]='S'}
+  var target=Math.floor(participants.length/2);
+  function count(role){return participants.filter(function(id){return lateRoles[id]===role}).length}
+  if(active.stage==='live'){
+    var current=curState();
+    [current.striker,current.nonStriker].forEach(function(id){if(id!=null&&id!==-1&&lateRoles[id]==='?')lateRoles[id]=current.batting});
+    if(!current.needsBowler&&current.bowler!=null&&lateRoles[current.bowler]==='?')lateRoles[current.bowler]=otherK(current.batting);
+  }
+  participants.forEach(function(id){
+    if(lateRoles[id]!=='?')return;
+    lateRoles[id]=count('A')<target&&(count('A')<=count('B')||count('B')>=target)?'A':'B';
+  });
+  renderLateTeamUpdate();
+}
+function setLateRole(id,role){
+  if(role==='S'){
+    if(!lateOdd)return;
+    var oldShared=latePlayerOrder.find(function(pid){return lateRoles[pid]==='S'});
+    var oldRole=lateRoles[id];
+    if(oldShared&&oldShared!==id)lateRoles[oldShared]=(oldRole==='A'||oldRole==='B')?oldRole:'?';
+  }
+  lateRoles[id]=role;renderLateTeamUpdate();
+}
+function renderLateTeamUpdate(){
+  var a=latePlayerOrder.filter(function(id){return lateRoles[id]==='A'}).length;
+  var b=latePlayerOrder.filter(function(id){return lateRoles[id]==='B'}).length;
+  var s=latePlayerOrder.filter(function(id){return lateRoles[id]==='S'}).length;
+  var h='<h3>Team update</h3><div class="sub" style="margin-bottom:8px">Existing score and recorded play will stay unchanged. These teams apply from the next ball'+(active.stage==='break'?' of the second innings':'')+'.</div>';
+  h+='<div style="font-weight:700;margin-bottom:4px">'+latePlayerOrder.length+' players · '+(lateOdd?'Choose one Shared player':'No Shared player needed')+'</div>';
+  h+='<div class="sub" style="margin-bottom:8px">Team A: '+a+' · Team B: '+b+(lateOdd?' · Shared: '+s:'')+'</div>';
+  latePlayerOrder.forEach(function(id){
+    h+='<div class="pick row" style="gap:6px;align-items:center"><span class="grow">'+esc(nameOf(active,id))+'</span>';
+    ['A','B'].concat(lateOdd?['S']:[]).forEach(function(role){
+      var label=role==='S'?'⭐':role;
+      h+='<button class="back" style="width:38px;height:34px;border-color:'+(lateRoles[id]===role?(role==='S'?'#f5c542':'#22c55e'):'var(--line)')+'" onclick="setLateRole('+jid(id)+',\''+role+'\')">'+label+'</button>';
+    });
+    h+='</div>';
+  });
+  h+='<button class="btn" onclick="applyLatePlayers()">Apply players</button>';
+  h+='<button class="pick" onclick="renderLatePlayerSelection()">← Back</button>';
+  showModal(h,false);
+}
+function applyLatePlayers(){
+  if(!canAddLatePlayers()){closeModal();return}
+  var a=latePlayerOrder.filter(function(id){return lateRoles[id]==='A'});
+  var b=latePlayerOrder.filter(function(id){return lateRoles[id]==='B'});
+  var sharedIds=latePlayerOrder.filter(function(id){return lateRoles[id]==='S'});
+  if(a.length!==b.length){alert('Team A and Team B need the same number of team-only players.');return}
+  if(lateOdd&&sharedIds.length!==1){alert('An odd group needs exactly one Shared player.');return}
+  if(!lateOdd&&sharedIds.length){alert('An even group cannot have a Shared player.');return}
+  if(a.length+b.length+sharedIds.length!==latePlayerOrder.length){alert('Assign every player to Team A, Team B, or Shared.');return}
+  var shared=sharedIds[0]||null;
+  function proposedTeam(k){return (k==='A'?a:b).concat(shared?[shared]:[])}
+  if(active.stage==='live'){
+    var st=curState(),batting=proposedTeam(st.batting),bowling=proposedTeam(otherK(st.batting));
+    if(st.striker!=null&&st.striker!==-1&&batting.indexOf(st.striker)===-1){alert('Keep the current striker on '+teamOf(active,st.batting).name+' or make them Shared.');return}
+    if(st.nonStriker!=null&&st.nonStriker!==-1&&batting.indexOf(st.nonStriker)===-1){alert('Keep the current non-striker on '+teamOf(active,st.batting).name+' or make them Shared.');return}
+    if(!st.needsBowler&&st.bowler!=null&&bowling.indexOf(st.bowler)===-1){alert('Keep the current bowler on '+teamOf(active,otherK(st.batting)).name+' or make them Shared.');return}
+  }
+  var boundary=lateBoundary(),helpers=uniqueIds(active.helpers||[]).filter(function(id){return id!==shared&&(a.indexOf(id)>-1||b.indexOf(id)>-1)});
+  active.teamA.ids=a.concat(shared?[shared]:[]);active.teamB.ids=b.concat(shared?[shared]:[]);
+  active.shared=shared;active.helpers=helpers;
+  ensureRosterTransitions(active).push({
+    inningsIndex:boundary.inningsIndex,eventIndex:boundary.eventIndex,
+    teamAPlayerIds:a.slice(),teamBPlayerIds:b.slice(),sharedPlayerId:shared,
+    fieldingHelperIds:helpers.slice(),appliedAt:new Date().toISOString()
+  });
+  if(!active.names)active.names={};
+  latePlayerOrder.forEach(function(id){active.names[id]=nameOf(active,id)});
+  markMatchChangedForSync(active);save();closeModal();
+  if(active.stage==='break')renderBreak();else sync();
+  alert('Players added. Score and match history preserved.');
+}
 function pushEv(ev){if(!ev.ts)ev.ts=new Date().toISOString();curInn().events.push(ev);sync()}
 function addRun(r){pushEv({t:'run',r:r})}
 function addWide(){pushEv({t:'wide'})}
@@ -1313,25 +1579,24 @@ function wicketModal(){
   showModal('<h3>How was it?</h3>'+opts);
 }
 function fielderChoices(st,kind){
-  var bowl=teamOf(active,otherK(st.batting));
   var seen={},list=[];
-  bowl.ids.forEach(function(id){if(id!==st.striker&&id!==st.nonStriker&&!(kind==='stumped'&&id===st.bowler)&&!seen[id]){seen[id]=1;list.push({id:id,side:'bowling'})}});
-  (active.helpers||[]).forEach(function(id){if(id!==st.striker&&id!==st.nonStriker&&!(kind==='stumped'&&id===st.bowler)&&!seen[id]){seen[id]=1;list.push({id:id,side:'helper'})}});
+  (st.bowlingIds||[]).forEach(function(id){if(id!==st.striker&&id!==st.nonStriker&&!(kind==='stumped'&&id===st.bowler)&&!seen[id]){seen[id]=1;list.push({id:id,side:'bowling'})}});
+  (st.helperIds||[]).forEach(function(id){if(id!==st.striker&&id!==st.nonStriker&&!(kind==='stumped'&&id===st.bowler)&&!seen[id]){seen[id]=1;list.push({id:id,side:'helper'})}});
   return list;
 }
 var runOutPick=null;
 function runOutContext(){
-  var st=curState(),bat=teamOf(active,st.batting);
+  var st=curState(),bat=teamOf(active,st.batting),batIds=st.battingIds||bat.ids;
   var dismissed=(runOutPick.who==='striker')?st.striker:st.nonStriker;
-  var inningsEnds=st.wickets+1>=bat.ids.length;
+  var inningsEnds=st.wickets+1>=batIds.length;
   var survivors=[];
   if(st.striker!=null&&st.striker!==-1&&st.striker!==dismissed)survivors.push(st.striker);
   if(st.nonStriker!=null&&st.nonStriker!==-1&&st.nonStriker!==dismissed)survivors.push(st.nonStriker);
-  var available=bat.ids.filter(function(id){
+  var available=batIds.filter(function(id){
     return id!==dismissed&&!st.batsmen[id].out&&survivors.indexOf(id)===-1;
   });
   return {st:st,bat:bat,dismissed:dismissed,inningsEnds:inningsEnds,survivors:survivors,available:available,
-    two:active.battingMode==='two_batter'&&bat.ids.length>1};
+    two:active.battingMode==='two_batter'&&batIds.length>1};
 }
 function startRunOut(who){
   runOutPick={who:who,runs:0,fielder:null,newBatter:null,nextStriker:null,nextNonStriker:null};
@@ -1450,7 +1715,13 @@ function wkt(who,kind){
   closeModal();
   pushEv({t:'wicket',who:who,kind:kind,fielder:fielder,next:null});
 }
-function removeLastScoringEvent(inn){
+function shiftRosterBoundaries(m,inningsIndex,fromEventIndex,delta){
+  if(!m||!Array.isArray(m.rosterTransitions)||!delta)return;
+  m.rosterTransitions.forEach(function(snap){
+    if(snap.inningsIndex===inningsIndex&&snap.eventIndex>fromEventIndex)snap.eventIndex=Math.max(0,snap.eventIndex+delta);
+  });
+}
+function removeLastScoringEvent(inn,m,inningsIndex){
   if(!inn||!inn.events.length)return false;
   if(inn.events[inn.events.length-1].t==='bowler'){
     if(inn.events.length===1)return false;
@@ -1458,11 +1729,16 @@ function removeLastScoringEvent(inn){
   }
   if(!inn.events.length)return false;
   inn.events.pop();
+  if(m&&Array.isArray(m.rosterTransitions)){
+    m.rosterTransitions.forEach(function(snap){
+      if(snap.inningsIndex===inningsIndex&&snap.eventIndex>inn.events.length)snap.eventIndex=inn.events.length;
+    });
+  }
   return true;
 }
 function undo(){
   var inn=curInn();
-  if(!removeLastScoringEvent(inn))return;
+  if(!removeLastScoringEvent(inn,active,active.current))return;
   closeModal();
   active.stage='live';
   navStack=['home','score'];
@@ -1478,8 +1754,7 @@ function sync(){
   if(st.needsBowler){bowlerModal(st);return}
 }
 function batsmanModal(st){
-  var bat=teamOf(active,st.batting);
-  var avail=bat.ids.filter(function(id){return !st.batsmen[id].out&&id!==st.striker&&id!==st.nonStriker});
+  var avail=(st.battingIds||[]).filter(function(id){return st.batsmen[id]&&!st.batsmen[id].out&&id!==st.striker&&id!==st.nonStriker});
   var h='<h3>New batsman</h3>';
   avail.forEach(function(id){
     h+='<button class="pick" onclick="assignNext('+jid(id)+')">'+esc(pname(id))+'</button>';
@@ -1495,8 +1770,7 @@ function assignNext(id){
   sync();
 }
 function bowlerModal(st){
-  var bowl=teamOf(active,otherK(st.batting));
-  var ids=bowl.ids.filter(function(id){return id!==st.striker&&id!==st.nonStriker&&id!==st.lastOverBowler});
+  var ids=(st.bowlingIds||[]).filter(function(id){return id!==st.striker&&id!==st.nonStriker&&id!==st.lastOverBowler});
   var h='<h3>'+(st.balls===0?'Opening bowler':'Over complete — next bowler')+'</h3>';
   if(st.lastOverBowler)h+='<div class="sub" style="margin-bottom:8px">'+esc(pname(st.lastOverBowler))+' can\'t bowl two overs in a row (website rule).</div>';
   if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available without repeating the previous over.</div>';
@@ -1524,6 +1798,7 @@ function renderBreak(){
   h+='<div class="target" style="margin-top:14px">🎯 '+esc(teamOf(active,otherK(v.batting)).name)+' need <b>'+(v.score+1)+'</b> to win</div>';
   h+='</div>';
   h+=scorecardHTML(active,0);
+  if(lateCandidates().length)h+='<button class="btn gold" onclick="openLatePlayers()">＋ Add late players</button>';
   h+='<button class="btn ghost" onclick="undo()">↩ Undo last ball</button>';
   document.getElementById('breakBody').innerHTML=h;
 }
@@ -1534,8 +1809,9 @@ function potmFlow(){
   active.result=computeResult(active);
   var xp=computeXP(active);
   var ids=allIds(active).slice().sort(function(a,b){return xp.players[b].preTotal-xp.players[a].preTotal});
-  var h='<h3>Player of the Match preview (+15 XP)</h3>';
-  if(xp.tie)h+='<div class="sub" style="margin-bottom:8px">It\'s a tie on XP — your call!</div>';
+  var h='<h3>Player of the Match preview · XP '+xp.ruleVersion.toUpperCase()+'</h3>';
+  h+='<div class="sub" style="margin-bottom:8px">Recommendation uses the pre-POM performance score. Admin review confirms the official award.</div>';
+  if(xp.tie)h+='<div class="sub" style="margin-bottom:8px">It\'s an exact tie — no recommendation.</div>';
   ids.forEach(function(id){
     var rec=(xp.recommended===id);
     h+='<button class="pick '+(rec?'rec':'')+'" onclick="finishMatch('+jid(id)+')">'+(rec?'⭐ ':'')+esc(pname(id))+' <span class="note">'+xp.players[id].preTotal+' XP'+(rec?' · recommended':'')+'</span></button>';
@@ -1565,14 +1841,14 @@ function matchSummaryHTML(m,withCards){
   var xp=computeXP(m);
   var h='';
   if(m.potm)h+='<div class="potm"><div class="sub">PLAYER OF THE MATCH PREVIEW (+15 XP)</div><div class="who">'+esc(nameOf(m,m.potm))+'</div><div class="sub">Official award is confirmed during Admin review.</div></div>';
-  h+='<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:6px"><span class="sub">XP earned this match</span>'+syncBadge(m)+'</div>';
+  h+='<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:6px"><span class="sub">Projected Match XP · XP '+xp.ruleVersion.toUpperCase()+'</span>'+syncBadge(m)+'</div>';
   h+='<table><tr><th>Player</th><th class="r">Bat</th><th class="r">Bowl</th><th class="r">Field</th><th class="r">Total</th></tr>';
   var rows=allIds(m).map(function(id){return {id:id,r:xp.players[id]}});
   rows.sort(function(a,b){return b.r.total-a.r.total});
   rows.forEach(function(x){
     h+='<tr><td>'+esc(nameOf(m,x.id))+(m.potm===x.id?' ⭐':'')+'</td><td class="r">'+x.r.bat+'</td><td class="r">'+x.r.bowl+'</td><td class="r">'+x.r.fieldXP+'</td><td class="r"><b>'+(x.r.total>=0?'+':'')+x.r.total+'</b></td></tr>';
   });
-  h+='</table><div class="sub" style="margin-top:6px">Includes +20 participation'+(winnerKey(m)?', +5 win bonus (not for the shared player)':'')+'. The website applies the same formulas on sync.</div></div>';
+  h+='</table><div class="sub" style="margin-top:6px">Includes +20 participation'+(winnerKey(m)?', +5 win bonus (not for the shared player)':'')+'. This is a local preview; the website re-derives the match and calculates official XP from Match Date.</div></div>';
   if(withCards)h+=scorecardHTML(m,0)+scorecardHTML(m,1);
   return h;
 }
@@ -1619,6 +1895,7 @@ function renderScore(st){
 function openMatchMenu(){
   showModal('<h3>Match options</h3>'+
   '<button class="pick" onclick="closeModal();viewLiveCard()">📋 Full scorecard</button>'+
+  (canAddLatePlayers()&&lateCandidates().length?'<button class="pick" onclick="openLatePlayers()">＋ Add late players</button>':'')+
   '<button class="pick" onclick="closeModal();abandonMatch()" style="color:#ef4444">🛑 Abandon match</button>');
 }
 function viewLiveCard(){
@@ -1732,7 +2009,7 @@ function editPotm(){
   var m=findMatch(editingMatchId);if(!m)return;
   var xp=computeXP(m);
   var ids=allIds(m).slice().sort(function(a,b){return xp.players[b].preTotal-xp.players[a].preTotal});
-  var h='<h3>Player of the Match preview</h3>';
+  var h='<h3>Player of the Match preview · XP '+xp.ruleVersion.toUpperCase()+'</h3>';
   ids.forEach(function(id){
     var rec=(xp.recommended===id);
     h+='<button class="pick '+(rec?'rec':'')+'" onclick="setPotm('+jid(id)+')">'+(rec?'⭐ ':'')+esc(nameOf(m,id))+' <span class="note">'+xp.players[id].preTotal+' XP</span></button>';
@@ -1778,8 +2055,7 @@ function appendBall(ix){
   var m=findMatch(editingMatchId);
   var v=getView(m,ix);
   if(v.needsBowler){
-    var bowl=teamOf(m,otherK(v.batting));
-    var ids=bowl.ids.filter(function(id){return id!==v.striker&&id!==v.nonStriker&&id!==v.lastOverBowler});
+    var ids=(v.bowlingIds||[]).filter(function(id){return id!==v.striker&&id!==v.nonStriker&&id!==v.lastOverBowler});
     var h='<h3>Next over — pick bowler first</h3>';
     if(v.lastOverBowler)h+='<div class="sub" style="margin-bottom:8px">'+esc(nameOf(m,v.lastOverBowler))+' can\'t bowl two overs in a row.</div>';
     if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available without repeating the previous over.</div>';
@@ -1797,9 +2073,8 @@ function edPushBowler(ix,id){
 function edFielder(kind,who){
   var m=findMatch(editingMatchId);
   var v=editorStateBeforeEvent(m);
-  var bowl=teamOf(m,otherK(v.batting));
   var seen={},list=[];
-  bowl.ids.concat(m.helpers||[]).forEach(function(id){if(!seen[id]){seen[id]=1;list.push(id)}});
+  (v.bowlingIds||[]).concat(v.helperIds||[]).forEach(function(id){if(!seen[id]){seen[id]=1;list.push(id)}});
   var title=kind==='caught'?'Who caught it?':(kind==='stumped'?'Who completed the stumping?':'Who ran them out?');
   var h='<h3>'+title+'</h3>';
   list.forEach(function(id){
@@ -1820,17 +2095,17 @@ function editorStateBeforeEvent(m){
   return replay(tmp,ix,target);
 }
 function edRunOutContext(){
-  var m=findMatch(editingMatchId),st=editorStateBeforeEvent(m),bat=teamOf(m,st.batting);
+  var m=findMatch(editingMatchId),st=editorStateBeforeEvent(m),bat=teamOf(m,st.batting),batIds=st.battingIds||bat.ids;
   var dismissed=(edRunOutPick.who==='striker')?st.striker:st.nonStriker;
-  var inningsEnds=st.wickets+1>=bat.ids.length;
+  var inningsEnds=st.wickets+1>=batIds.length;
   var survivors=[];
   if(st.striker!=null&&st.striker!==-1&&st.striker!==dismissed)survivors.push(st.striker);
   if(st.nonStriker!=null&&st.nonStriker!==-1&&st.nonStriker!==dismissed)survivors.push(st.nonStriker);
-  var available=bat.ids.filter(function(id){
+  var available=batIds.filter(function(id){
     return id!==dismissed&&!st.batsmen[id].out&&survivors.indexOf(id)===-1;
   });
   return {m:m,st:st,bat:bat,dismissed:dismissed,inningsEnds:inningsEnds,survivors:survivors,available:available,
-    two:m.battingMode==='two_batter'&&bat.ids.length>1};
+    two:m.battingMode==='two_batter'&&batIds.length>1};
 }
 function edRunOut(who){
   var m=findMatch(editingMatchId);
@@ -1872,8 +2147,7 @@ function edRunOutSetRuns(r){
 }
 function edRunOutFielderModal(){
   var ctx=edRunOutContext(),seen={},list=[];
-  var bowl=teamOf(ctx.m,otherK(ctx.st.batting));
-  bowl.ids.concat(ctx.m.helpers||[]).forEach(function(id){
+  (ctx.st.bowlingIds||[]).concat(ctx.st.helperIds||[]).forEach(function(id){
     if(id!==ctx.st.striker&&id!==ctx.st.nonStriker&&!seen[id]){seen[id]=1;list.push(id)}
   });
   var h='<h3>Run-out fielder</h3>';
@@ -1966,7 +2240,7 @@ function edApply(ev){
   closeModal();
   var m=findMatch(editingMatchId),evs=m.innings[edCtx.ix].events;
   if(edCtx.mode==='edit')evs[edCtx.evIdx]=ev;
-  else if(edCtx.mode==='insert')evs.splice(edCtx.evIdx,0,ev);
+  else if(edCtx.mode==='insert'){evs.splice(edCtx.evIdx,0,ev);shiftRosterBoundaries(m,edCtx.ix,edCtx.evIdx,1)}
   else evs.push(ev);
   editorRefresh(m);
 }
@@ -1975,18 +2249,19 @@ function edDelete(){
   closeModal();
   var m=findMatch(editingMatchId);
   m.innings[edCtx.ix].events.splice(edCtx.evIdx,1);
+  shiftRosterBoundaries(m,edCtx.ix,edCtx.evIdx,-1);
   editorRefresh(m);
 }
 function editOverBowler(ix,bowlerEvIdx,overIx){
   var m=findMatch(editingMatchId);
   var v=getView(m,ix);
-  var bowl=teamOf(m,otherK(v.batting));
+  var snap=rosterSnapshotAt(m,ix,Math.max(0,bowlerEvIdx));
   var prevBowler=(v.overs[overIx-1]&&v.overs[overIx-1].bowler)||null;
   var nextBowler=(v.overs[overIx+1]&&v.overs[overIx+1].bowler)||null;
   var h='<h3>Change bowler for this over</h3>';
   if(prevBowler)h+='<div class="sub" style="margin-bottom:6px">Unavailable after Over '+overIx+': '+esc(nameOf(m,prevBowler))+'</div>';
   if(nextBowler)h+='<div class="sub" style="margin-bottom:8px">Unavailable before Over '+(overIx+2)+': '+esc(nameOf(m,nextBowler))+'</div>';
-  var ids=bowl.ids.filter(function(id){return id!==prevBowler&&id!==nextBowler});
+  var ids=snapshotTeamIds(snap,otherK(v.batting)).filter(function(id){return id!==prevBowler&&id!==nextBowler});
   if(!ids.length)h+='<div class="sub" style="margin-bottom:8px;color:var(--red)">No eligible bowler is available for this correction without creating consecutive overs.</div>';
   ids.forEach(function(id){
     h+='<button class="pick" onclick="closeModal();edSetBowler('+ix+','+bowlerEvIdx+','+jid(id)+')">'+esc(nameOf(m,id))+'</button>';
