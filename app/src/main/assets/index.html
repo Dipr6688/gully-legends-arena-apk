@@ -240,6 +240,7 @@ footer{position:fixed;bottom:0;left:0;right:0;text-align:center;color:#3d4a66;fo
     <div class="sub" style="margin-bottom:7px">This over</div>
     <div class="balls" id="thisOver"></div>
   </div>
+  <button id="latePlayersLiveBtn" class="btn gold" onclick="openLatePlayers()" style="display:none">＋ Add late players</button>
   <div class="padgrid">
     <button class="pad" onclick="addRun(0)">0</button>
     <button class="pad" onclick="addRun(1)">1</button>
@@ -1891,6 +1892,8 @@ function renderScore(st){
     var cls='';if(x==='4')cls='b4';if(x==='6')cls='b6';if(x.indexOf('W')===0)cls='bw';
     return '<div class="ball '+cls+'">'+x+'</div>';
   }).join('')||'<span class="sub">—</span>';
+  var lateBtn=document.getElementById('latePlayersLiveBtn');
+  if(lateBtn)lateBtn.style.display=(canAddLatePlayers()&&lateCandidates().length)?'block':'none';
 }
 function openMatchMenu(){
   showModal('<h3>Match options</h3>'+

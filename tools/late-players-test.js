@@ -63,7 +63,24 @@ function thirteenBallEvents(firstBowler = "b1") {
   ];
 }
 
-function liveMatch({ shared = null, a = A, b = B } = {}) {
+function eventsForLegalBalls(legalBalls, firstBowler = "b1") {
+  const bowlers = [firstBowler, "b2", "b3", "b1"].filter((id, ix, arr) => arr.indexOf(id) === ix);
+  const events = [{ t: "bowler", id: bowlers[0] }];
+  for (let i = 0; i < legalBalls; i += 1) {
+    if (i > 0 && i % 6 === 0) {
+      const next = bowlers[Math.floor(i / 6) % bowlers.length];
+      events.push({ t: "bowler", id: next });
+    }
+    events.push({ t: "run", r: 0 });
+  }
+  return events;
+}
+
+function nextAllowedBowler(state) {
+  return B.find((id) => id !== state.striker && id !== state.nonStriker && id !== state.lastOverBowler) || "b2";
+}
+
+function liveMatch({ shared = null, a = A, b = B, events = null } = {}) {
   const teamA = a.concat(shared ? [shared] : []);
   const teamB = b.concat(shared ? [shared] : []);
   return {
@@ -74,7 +91,7 @@ function liveMatch({ shared = null, a = A, b = B } = {}) {
     overs: 4, battingMode: "two_batter", rules: { wide: true, nb: true },
     teamA: { name: "Team A", ids: teamA.slice() }, teamB: { name: "Team B", ids: teamB.slice() },
     shared, helpers: ["b4"], stage: "live", current: 0, finished: false, result: "", potm: null,
-    innings: [{ batting: "A", openers: { s: "a1", ns: "a2" }, events: thirteenBallEvents(shared || "b1") }],
+    innings: [{ batting: "A", openers: { s: "a1", ns: "a2" }, events: events ? events.slice() : thirteenBallEvents(shared || "b1") }],
     names: Object.fromEntries(ALL.map((id) => [id, id.toUpperCase()])),
     rosterTransitions: [{
       inningsIndex: 0, eventIndex: 0, teamAPlayerIds: a.slice(), teamBPlayerIds: b.slice(),
@@ -102,6 +119,48 @@ function applyUpdate() {
   context.applyLatePlayers();
   assert.strictEqual(alerts.length, beforeAlerts + 1, "a successful roster update should confirm preservation");
   assert.match(alerts.at(-1), /Score and match history preserved/);
+}
+
+// Mid-over late-player updates are safe at every committed delivery boundary.
+for (const legalBalls of [0, 1, 3, 5, 6, 13]) {
+  const match = liveMatch({ events: eventsForLegalBalls(legalBalls) });
+  context.active = match;
+  const beforeState = context.curState();
+  const beforeEvents = JSON.stringify(match.innings[0].events);
+  const beforeEventIndex = match.innings[0].events.length;
+  assert.strictEqual(beforeState.balls, legalBalls, `fixture starts at ${context.ov(legalBalls)}`);
+  assert.strictEqual(context.canAddLatePlayers(), true, `late players available at ${context.ov(legalBalls)}`);
+
+  context.renderScore(beforeState);
+  assert.strictEqual(elements.get("latePlayersLiveBtn").style.display, "block", `live Add Late Players button visible at ${context.ov(legalBalls)}`);
+
+  beginUpdate(match, ["n1", "n2"]);
+  applyUpdate();
+
+  const transition = match.rosterTransitions.at(-1);
+  assert.deepStrictEqual([transition.inningsIndex, transition.eventIndex], [0, beforeEventIndex],
+    `transition is after the latest committed event at ${context.ov(legalBalls)}`);
+  assert(!context.snapshotTeamIds(context.rosterSnapshotAt(match, 0, Math.max(0, beforeEventIndex - 1)), "A").includes("n1"),
+    "late player is not retroactively available before the transition boundary");
+  assert(context.snapshotTeamIds(context.rosterSnapshotAt(match, 0, beforeEventIndex), "A").concat(
+    context.snapshotTeamIds(context.rosterSnapshotAt(match, 0, beforeEventIndex), "B"),
+  ).some((id) => id === "n1" || id === "n2"), "late players are available at the transition boundary");
+
+  const afterState = context.replay(match, 0, null);
+  assert.strictEqual(afterState.score, beforeState.score, `score is preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(afterState.balls, beforeState.balls, `overs are preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(afterState.wickets, beforeState.wickets, `wickets are preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(afterState.striker, beforeState.striker, `striker is preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(afterState.nonStriker, beforeState.nonStriker, `non-striker is preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(afterState.bowler, beforeState.bowler, `current bowler is preserved at ${context.ov(legalBalls)}`);
+  assert.strictEqual(JSON.stringify(match.innings[0].events), beforeEvents, `event history is unchanged at ${context.ov(legalBalls)}`);
+
+  if (afterState.needsBowler) {
+    match.innings[0].events.push({ t: "bowler", id: nextAllowedBowler(afterState) });
+  }
+  match.innings[0].events.push({ t: "run", r: 1 });
+  const continued = context.replay(match, 0, null);
+  assert.strictEqual(continued.balls, legalBalls + 1, `next legal ball continues from ${context.ov(legalBalls)}`);
 }
 
 // A. Score, wickets, balls, active pair, and event history are byte-for-byte preserved.
